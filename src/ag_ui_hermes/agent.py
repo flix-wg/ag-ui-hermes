@@ -551,7 +551,9 @@ class HermesAgent:
             async with aclosing(self.client.events(run_id)) as stream:
                 async for event in stream:
                     seq = event.get("seq")
-                    silent = isinstance(seq, int) and seq <= silent_until
+                    # The unsequenced truncation marker emits nothing, so it must not open the
+                    # run before a silent replay has restored its open subagents.
+                    silent = seq <= silent_until if isinstance(seq, int) else event.get("event") == "replay.truncated"
                     if reask and isinstance(seq, int) and not silent:  # the replay passed the interrupt
                         lost = t.last_seq < 0 and seq > silent_until + 1
                         held, reask = await self._reasked(run_id, held, reask, lost=lost), ()

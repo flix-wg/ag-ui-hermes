@@ -25,6 +25,8 @@ from pydantic import BaseModel, TypeAdapter
 
 from ag_ui_hermes import HermesTranslator
 from ag_ui_hermes.translator import run_started
+from tests.fake_hermes import FakeHermes
+from tests.test_agent import agent_input, answer, collect, make_agent
 from tests.test_translator import RUN, hide_secrets
 
 STREAMS = Path(__file__).parent / "streams"
@@ -207,3 +209,23 @@ def test_translator_output_conforms() -> None:
         assert events[0].keys() == declared.keys()
         assert events[0]["protocolVersion"] == declared["protocolVersion"]
     assert wire([run_started("t", "r")])[0]["protocolVersion"] == "1.0"
+
+
+async def test_a_resume_after_a_truncated_backlog_conforms() -> None:
+    fake = FakeHermes(
+        [
+            {"event": "message.delta", "delta": "Delegating"},
+            {"event": "tool.started", "tool": "delegate_task"},
+            {"event": "subagent.start", "subagent_id": "s1", "goal": "look"},
+            {"event": "approval.request", "request_id": "q1", "command": "ls"},
+            {"event": "subagent.complete", "subagent_id": "s1", "status": "completed", "summary": "done"},
+            {"event": "tool.completed", "tool": "delegate_task", "preview": "done"},
+            {"event": "run.completed", "output": "Finished"},
+        ]
+    )
+    agent = make_agent(fake)
+    verify(wire(await collect(agent.run(agent_input()))))
+    fake.runs["run_1"].evicted = 1  # the resume's replay opens with an unsequenced replay.truncated
+    resumed = wire(await collect(agent.run(answer("r2", "q1"))))
+    verify(resumed)
+    assert [e["type"] for e in resumed if e["type"].startswith("SUBAGENT")] == ["SUBAGENT_STARTED", "SUBAGENT_FINISHED"]
