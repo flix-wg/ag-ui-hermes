@@ -115,6 +115,10 @@ class FakeHermes:
             new = self.runs[run_id] = FakeRun(run_id, body.get("session_id") or run_id)
             new.task = asyncio.create_task(new.drive(self.scripts.pop(0)))
             return httpx.Response(202, json={"run_id": run_id, "status": "started", "replayed": False})
+        if path == "/v1/capabilities":
+            features = {"run_events_sse": True, "approval_events": True, "reasoning_streaming": True}
+            return httpx.Response(200, json={"object": "hermes.api_server.capabilities", "model": "hermes-agent",
+                                             "features": features})
         session = re.fullmatch(r"/api/sessions/([^/]+)/messages", path)
         if session:
             rows = self.sessions.get(session.group(1))

@@ -31,7 +31,8 @@ async def authorize(ctx: HookContext) -> bool:
 client = HermesRunsClient("http://127.0.0.1:8642", api_key=os.environ["API_SERVER_KEY"])
 app = FastAPI()
 add_hermes_fastapi_endpoint(app, HermesAgent(client, authorize=authorize), "/agent")
-# POST /agent (run), POST /agent/connect (rejoin), POST /agent/stop {"threadId", "runId"}
+# POST /agent (run), POST /agent/connect (rejoin), POST /agent/stop {"threadId", "runId"},
+# GET /agent/capabilities
 ```
 
 `add_hermes_fastapi_endpoint` passes extra keyword arguments (`dependencies`, `tags`, ...) to
@@ -58,6 +59,12 @@ Closing the browser or switching threads only detaches: the Hermes run keeps goi
 `abortRun()`, which posts the thread and its last run id to `/agent/stop`; the server stops the
 Hermes run only if that AG-UI run started, resumed or rejoined it, so a late stop cannot cancel a
 newer run. `runId` is required; before its first run or connect the agent posts no stop.
+
+`GET /agent/capabilities` (`HermesAgent.capabilities()`, the JS `getCapabilities()`) answers an
+AG-UI `AgentCapabilities` object: streaming, server-side tools only (`tools.clientProvided:
+false`), interrupts and approvals, delegation, image input, reasoning (from Hermes
+`/v1/capabilities`), state snapshots and deltas when a `state_provider` is set, and the Hermes
+model under `custom.hermes.model`. A Hermes error answers HTTP 502.
 
 ## Event mapping
 
@@ -122,8 +129,8 @@ after the last tool call. A missing suffix is appended, unstreamed output become
 
 ## Hooks
 
-Every hook gets a `HookContext` first: `action` (`"run"`, `"connect"` or `"stop"`),
-`thread_id`, `run_id`, `input` (the `RunAgentInput`, `None` for `stop`) and `request` (the
+Every hook gets a `HookContext` first: `action` (`"run"`, `"connect"`, `"stop"` or
+`"capabilities"`), `thread_id`, `run_id` (both empty for `"capabilities"`), `input` (the `RunAgentInput`, `None` for `stop`) and `request` (the
 Starlette `Request` from the FastAPI endpoint, or what you pass as `request=` to `run`,
 `connect`, `open_run`, `open_connect` and `stop`). Type aliases for each hook live in
 `ag_ui_hermes.agent`.
@@ -155,7 +162,8 @@ not change, and a new snapshot otherwise.
 
 `threadId` is chosen by the client, so anyone who knows a thread id could rejoin, stop or answer
 approvals on it. Pass `authorize`: it runs before `run` (including resumes), `connect` and `stop`
-touch the thread, and returning `False` refuses the request. The endpoint then answers HTTP 403;
+touch the thread, and before `capabilities` (with no thread, so check only the caller), and
+returning `False` refuses the request. The endpoint then answers HTTP 403;
 `HermesAgent.run`/`connect` used directly end with `RUN_ERROR` code `forbidden`, and `stop` raises
 `AgentForbiddenError`. Without `authorize` every request is allowed, which only suits a
 single-user host or one that checks the thread in a route dependency.

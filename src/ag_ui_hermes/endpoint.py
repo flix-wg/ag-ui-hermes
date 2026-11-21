@@ -26,7 +26,8 @@ def add_hermes_fastapi_endpoint(
     path: str = "/",
     **route_kwargs: Any,
 ) -> None:
-    """Register ``POST path`` (run), ``POST path/connect`` (rejoin) and ``POST path/stop``.
+    """Register ``POST path`` (run), ``POST path/connect`` (rejoin), ``POST path/stop`` and
+    ``GET path/capabilities`` (AG-UI ``AgentCapabilities``).
 
     Closing a run or connect response only detaches the client; ``/stop``
     (``{"threadId", "runId"}``) stops the Hermes run if that AG-UI run owns it.
@@ -61,6 +62,14 @@ def add_hermes_fastapi_endpoint(
         except AgentForbiddenError as exc:
             return _error(exc)
         return stream(request, events)
+
+    @app.get(f"{base}/capabilities", **route_kwargs)
+    async def capabilities(request: Request) -> Response:
+        try:
+            caps = await agent.capabilities(request=request)
+        except HermesError as exc:
+            return _error(exc)
+        return JSONResponse(caps.model_dump(mode="json", by_alias=True, exclude_none=True))
 
     @app.post(f"{base}/stop", **route_kwargs)
     async def stop(body: StopRequest, request: Request) -> Response:

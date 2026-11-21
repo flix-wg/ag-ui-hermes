@@ -470,7 +470,7 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
     agent.authorize = authorize
     app = FastAPI()
     add_hermes_fastapi_endpoint(app, agent, "/agent", tags=["agent"])
-    assert sum(getattr(route, "tags", None) == ["agent"] for route in app.routes) == 3
+    assert sum(getattr(route, "tags", None) == ["agent"] for route in app.routes) == 4
     owner, eve = {"x-user": "felix"}, {"x-user": "eve"}
     body = agent_input().model_dump(mode="json", by_alias=True)
     no_text = agent_input("r2", [AssistantMessage(id="a1", content="?")]).model_dump(mode="json", by_alias=True)
@@ -482,6 +482,12 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
             denied = await client.post(route, json=payload, headers=eve)
             assert denied.status_code == 403
             assert denied.json()["error"]["code"] == "forbidden"
+        assert (await client.get("/agent/capabilities", headers=eve)).status_code == 403
+        caps = (await client.get("/agent/capabilities", headers=owner)).json()
+        assert caps["tools"] == {"supported": True, "clientProvided": False}
+        assert caps["humanInTheLoop"]["interrupts"] is True
+        assert caps["multimodal"]["input"]["image"] is True
+        assert caps["custom"] == {"hermes": {"model": "hermes-agent"}}
         invalid = await client.post("/agent", json=no_text, headers=owner)
         assert invalid.status_code == 400
         assert invalid.json()["error"]["code"] == "invalid_input"
@@ -496,7 +502,7 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
     for text_ in (response.text, rejoined.text):
         assert "Working" in text_
         assert '"outcome":{"type":"success"}' in text_
-    assert {("run", "eve"), ("connect", "eve"), ("stop", "eve"), ("connect", "felix")} <= set(seen)
+    assert {("run", "eve"), ("connect", "eve"), ("stop", "eve"), ("capabilities", "eve"), ("connect", "felix")} <= set(seen)
     refused = await collect(agent.run(agent_input("r4")))
     assert isinstance(refused[-1], RunErrorEvent)
     assert refused[-1].code == "forbidden"

@@ -14,25 +14,35 @@ from functools import partial
 from typing import Any, Literal
 
 from ag_ui.core import (
+    AgentCapabilities,
     AssistantMessage,
     BaseEvent,
     DataSource,
     FunctionCall,
+    HumanInTheLoopCapabilities,
+    IdentityCapabilities,
     ImagePart,
     Message,
     MessagesSnapshotEvent,
+    MultiAgentCapabilities,
+    MultimodalCapabilities,
+    MultimodalInputCapabilities,
+    ReasoningCapabilities,
     ResumeEntry,
     RunAgentInput,
     RunErrorEvent,
     RunFinishedEvent,
     RunFinishedSuccessOutcome,
     RunStartedEvent,
+    StateCapabilities,
     StateDeltaEvent,
     StateSnapshotEvent,
     SubagentFinishedEvent,
     TextPart,
     ToolCall,
     ToolMessage,
+    ToolsCapabilities,
+    TransportCapabilities,
     UrlSource,
     UserMessage,
 )
@@ -55,8 +65,9 @@ _FORWARDABLE = frozenset({"model", "provider", "model_options"})
 class HookContext:
     """The request a hook runs for; every hook gets it as its first argument."""
 
-    action: Literal["run", "connect", "stop"]
+    action: Literal["run", "connect", "stop", "capabilities"]
     thread_id: str
+    """Empty for ``capabilities``, which concerns no thread."""
     run_id: str
     input: RunAgentInput | None = None
     """The AG-UI input; ``None`` for ``stop``."""
@@ -208,6 +219,36 @@ class HermesAgent:
             self._report(ctx, exc)
             raise
 
+    async def capabilities(self, *, request: Any = None) -> AgentCapabilities:
+        """AG-UI capabilities of this agent, with what Hermes ``/v1/capabilities`` reports."""
+        ctx = HookContext("capabilities", "", "", None, request)
+        try:
+            await self._authorize(ctx)
+            fetch = getattr(self.client, "get_capabilities", None)
+            hermes = await fetch() if fetch is not None else {}
+        except Exception as exc:
+            self._report(ctx, exc)
+            raise
+        features = hermes.get("features")
+        features = features if isinstance(features, dict) else {}
+        model = hermes.get("model")
+        state = self.state_provider is not None
+        return AgentCapabilities(
+            identity=IdentityCapabilities(name="Hermes Agent", type="hermes", provider="Nous Research"),
+            transport=TransportCapabilities(streaming=True),
+            tools=ToolsCapabilities(supported=True, client_provided=False),
+            state=StateCapabilities(snapshots=state, deltas=state),
+            multi_agent=MultiAgentCapabilities(supported=True, delegation=True),
+            reasoning=ReasoningCapabilities(supported=features.get("reasoning_streaming") is not False, streaming=False),
+            multimodal=MultimodalCapabilities(
+                input=MultimodalInputCapabilities(image=True, audio=False, video=False, pdf=False, file=False)
+            ),
+            human_in_the_loop=HumanInTheLoopCapabilities(
+                supported=True, approvals=features.get("approval_events") is not False, interrupts=True
+            ),
+            custom={"hermes": {"model": model}} if isinstance(model, str) and model else None,
+        )
+
     async def _open(
         self, ctx: HookContext, prepare: Callable[[HookContext], Awaitable[AsyncGenerator[BaseEvent, None]]]
     ) -> AsyncGenerator[BaseEvent, None]:
@@ -231,7 +272,7 @@ class HermesAgent:
 
     async def _authorize(self, ctx: HookContext) -> None:
         if self.authorize is not None and not await self.authorize(ctx):
-            raise AgentForbiddenError(f"authorize refused {ctx.action} on thread {ctx.thread_id}")
+            raise AgentForbiddenError(f"authorize refused {ctx.action} on thread {ctx.thread_id!r}")
 
     async def _prepare_run(self, ctx: HookContext) -> AsyncGenerator[BaseEvent, None]:
         """Everything that can refuse the request, checked before any Hermes run is touched."""
