@@ -1,34 +1,76 @@
 {
   "name": "ag-ui-hermes",
   "version": "0.1.0",
-  "description": "AG-UI HttpAgent for ag-ui-hermes endpoints, with run rejoin through connect()",
+  "description": "AG-UI agent for Hermes Agent endpoints: an HttpAgent with run rejoin via connect(), explicit stop, dynamic headers and capabilities",
   "license": "MIT",
   "author": "Felix Wegener",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint:package": "publint && attw --pack . --profile node16",
+    "test:compat": "node scripts/test-compat.mjs",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "peerDependencies": {
-    "@ag-ui/client": "^1.0.3",
+    "@ag-ui/client": "~1.0.3",
     "rxjs": "^7.8.0"
   },
   "devDependencies": {
     "@ag-ui/client": "1.0.3",
+    "@arethetypeswrong/cli": "^0.18.5",
     "@assistant-ui/react-ag-ui": "0.1.11",
+    "@types/node": "^26.6.6",
+    "publint": "^0.3.25",
     "react": "19.3.1",
     "rxjs": "7.8.1",
+    "tsdown": "^0.23.7",
     "typescript": "~5.9.3",
     "vitest": "~3.2.4"
-  }
+  },
+  "keywords": [
+    "ag-ui",
+    "agui",
+    "hermes",
+    "hermes-agent",
+    "agent",
+    "assistant-ui",
+    "sse",
+    "http-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flix-wg/ag-ui-hermes.git",
+    "directory": "js"
+  },
+  "homepage": "https://github.com/flix-wg/ag-ui-hermes/tree/main/js#readme",
+  "bugs": {
+    "url": "https://github.com/flix-wg/ag-ui-hermes/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "module": "./dist/index.js"
 }
