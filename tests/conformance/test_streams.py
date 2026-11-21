@@ -141,8 +141,7 @@ def feed(
 
 
 def test_translator_output_conforms() -> None:
-    full = HermesTranslator("run_1", tool_filter=hide_secrets, passthrough_unknown=True, raw_unknown=True)
-    streams = [feed(full, "a1", RUN)]
+    streams = [feed(HermesTranslator("run_1", tool_filter=hide_secrets, unknown_events=mode), "a1", RUN) for mode in ("raw", "custom")]
 
     # An approval while a subagent works suspends the run; the resume is a second AG-UI run.
     suspended = HermesTranslator("r2", approval_timeout=60)

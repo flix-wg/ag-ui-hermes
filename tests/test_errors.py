@@ -69,7 +69,7 @@ class BrokenStore(InMemoryThreadStore):
         super().__init__()
         self.refuse = refuse
 
-    async def put_if_run(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
+    async def compare_and_set(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
         if self.refuse:
             return False
         raise RuntimeError("store down: password=hunter2")
@@ -100,13 +100,13 @@ async def test_thread_records_round_trip_and_the_memory_store_is_bounded(caplog:
         ThreadRecord.from_dict({**data, "schema_version": 99})
 
     store = InMemoryThreadStore(max_threads=2)
-    await store.put_if_run("busy", ThreadRecord(run_id="run_1"), None)
+    await store.compare_and_set("busy", ThreadRecord(run_id="run_1"), None)
     for thread in ("idle", "newer"):
-        await store.put_if_run(thread, ThreadRecord(), None)
+        await store.compare_and_set(thread, ThreadRecord(), None)
     assert await store.get("idle") is None
     assert await store.get("busy") is not None
     with caplog.at_level(logging.WARNING, logger="ag_ui_hermes"):
         for thread in ("busy2", "busy3"):  # only idle threads are evicted, so live runs grow past the cap
-            await store.put_if_run(thread, ThreadRecord(run_id=thread), None)
+            await store.compare_and_set(thread, ThreadRecord(run_id=thread), None)
     assert [await store.get(t) is not None for t in ("busy", "newer", "busy2", "busy3")] == [True, False, True, True]
     assert "max_threads" in caplog.text

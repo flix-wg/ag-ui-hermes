@@ -6,58 +6,17 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self, runtime_checkable
 from urllib.parse import quote
 
 import httpx
+
+from .errors import HermesAPIError, HermesResponseError, HermesUnreachableError, RunStreamGoneError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 
 logger = logging.getLogger("ag_ui_hermes")
-
-
-class HermesError(Exception):
-    """Base error of this package.
-
-    ``code`` and ``public_message`` are what a ``RUN_ERROR`` carries; ``str(exc)`` holds the
-    cause and only goes to the log.
-    """
-
-    code: ClassVar[str] = "hermes_error"
-    public_message: ClassVar[str] = "The Hermes request failed."
-
-
-class HermesUnreachableError(HermesError):
-    """Hermes could not be reached (connection, TLS or timeout failure)."""
-
-    code = "hermes_unreachable"
-    public_message = "The Hermes server is unreachable."
-
-
-class HermesAPIError(HermesError):
-    """Hermes answered with an HTTP error status."""
-
-    code = "hermes_rejected"
-    public_message = "The Hermes server rejected the request."
-
-    def __init__(self, status: int, message: str, upstream_code: str | None = None) -> None:
-        super().__init__(f"Hermes API {status}: {message}")
-        self.status, self.message, self.upstream_code = status, message, upstream_code
-
-
-class HermesResponseError(HermesError):
-    """Hermes answered 2xx with a body that is not the expected JSON object."""
-
-    code = "hermes_bad_response"
-    public_message = "The Hermes server sent an invalid response."
-
-
-class RunStreamGoneError(HermesError):
-    """The run's event stream is no longer available (finished and swept, or unknown)."""
-
-    code = "hermes_stream_gone"
-    public_message = "The Hermes run's event stream is gone."
 
 
 @dataclass(frozen=True)
@@ -99,14 +58,29 @@ class RunsClient(Protocol):
 
     def events(self, run_id: str, *, last_seq: int = -1) -> AsyncGenerator[dict[str, Any], None]: ...
 
-    # Optional, looked up with getattr so bridges without them keep working:
-    # ``async def session_messages(self, session_id: str) -> list[dict[str, Any]]`` (the
-    # ``data`` rows of ``GET /api/sessions/{id}/messages``) and
-    # ``async def get_capabilities(self) -> dict[str, Any]`` (``GET /v1/capabilities``).
+
+@runtime_checkable
+class SupportsSessionMessages(Protocol):
+    """Optional for a :class:`RunsClient`: lets ``connect`` restore a session's stored messages."""
+
+    async def session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """The ``data`` rows of ``GET /api/sessions/{id}/messages``, oldest first."""
+        ...
+
+
+@runtime_checkable
+class SupportsCapabilities(Protocol):
+    """Optional for a :class:`RunsClient`: adds what Hermes reports to the agent's capabilities."""
+
+    async def get_capabilities(self) -> dict[str, Any]:
+        """``GET /v1/capabilities``."""
+        ...
 
 
 class HermesRunsClient:
     """Talks to ``POST /v1/runs`` and its status, events, stop and approval routes.
+
+    Implements :class:`RunsClient`, :class:`SupportsSessionMessages` and :class:`SupportsCapabilities`.
 
     ``base_url`` is the API root without ``/v1`` (for example ``http://127.0.0.1:8642``,
     or a profile prefix such as ``http://host:8642/p/work``). Use it as an async context

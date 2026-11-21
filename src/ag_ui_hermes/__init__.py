@@ -2,25 +2,43 @@
 
 from importlib.metadata import version as _version
 
-from .agent import AgentForbiddenError, AgentInputError, HermesAgent, HookContext
-from .client import (
+from ._config import (
+    ApprovalPolicy,
+    Authorize,
+    CustomEventMapper,
+    HookContext,
+    InputPolicy,
+    OnError,
+    RequestLike,
+    RunBody,
+    StateProvider,
+    ToolFilter,
+)
+from .agent import HermesAgent
+from .client import HermesRunsClient, RunsClient, StartedRun, SupportsCapabilities, SupportsSessionMessages
+from .errors import (
+    AgentForbiddenError,
+    AgentInputError,
     HermesAPIError,
     HermesError,
     HermesResponseError,
-    HermesRunsClient,
     HermesUnreachableError,
-    RunsClient,
+    InvalidInputReason,
     RunStreamGoneError,
-    StartedRun,
+    RunTimeoutError,
+    StoreConflictError,
 )
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
-from .translator import HermesTranslator
+from .translator import HermesTranslator, UnknownEvents
 
 __version__ = _version("ag-ui-hermes")
 
 __all__ = [
     "AgentForbiddenError",
     "AgentInputError",
+    "ApprovalPolicy",
+    "Authorize",
+    "CustomEventMapper",
     "HermesAPIError",
     "HermesAgent",
     "HermesError",
@@ -30,10 +48,22 @@ __all__ = [
     "HermesUnreachableError",
     "HookContext",
     "InMemoryThreadStore",
+    "InputPolicy",
+    "InvalidInputReason",
+    "OnError",
+    "RequestLike",
+    "RunBody",
     "RunStreamGoneError",
+    "RunTimeoutError",
     "RunsClient",
     "StartedRun",
+    "StateProvider",
+    "StoreConflictError",
+    "SupportsCapabilities",
+    "SupportsSessionMessages",
     "ThreadRecord",
     "ThreadStore",
+    "ToolFilter",
+    "UnknownEvents",
     "__version__",
 ]

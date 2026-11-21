@@ -32,7 +32,7 @@ class ThreadRecord:
     started: dict[str, str] = field(default_factory=dict)
     """AG-UI run id -> Hermes run id for the thread's latest started runs, oldest first."""
     version: int = 0
-    """Bumped by every write, so ``put_if_run`` can refuse a record read before another write."""
+    """Bumped by every write, so ``compare_and_set`` can refuse a record read before another write."""
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready form with a ``schema_version``, for stores that serialize records."""
@@ -50,7 +50,7 @@ class ThreadRecord:
 class ThreadStore(Protocol):
     async def get(self, thread_id: str) -> ThreadRecord | None: ...
 
-    async def put_if_run(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
+    async def compare_and_set(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
         """Atomically store ``record`` with ``version + 1`` only if the stored record still owns
         Hermes run ``run_id`` and has ``record.version`` (a missing record counts as
         ``ThreadRecord()``)."""
@@ -80,7 +80,7 @@ class InMemoryThreadStore:
         self._records.move_to_end(thread_id)
         return copy.deepcopy(record)
 
-    async def put_if_run(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
+    async def compare_and_set(self, thread_id: str, record: ThreadRecord, run_id: str | None) -> bool:
         current = self._records.get(thread_id) or ThreadRecord()
         if current.run_id != run_id or current.version != record.version:
             return False

@@ -104,8 +104,7 @@ def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:
     replayed = feed_all(HermesTranslator("run_1", tool_filter=hide_secrets), RUN)
     assert [e.model_dump() for e in replayed] == [e.model_dump() for e in events]
 
-    passthrough = feed_all(HermesTranslator("run_1", passthrough_unknown=True, raw_unknown=True), RUN)
-    unknown = [e for e in passthrough if isinstance(e, (RawEvent, CustomEvent))]
+    unknown = [e for mode in ("raw", "custom") for e in feed_all(HermesTranslator("run_1", unknown_events=mode), RUN) if isinstance(e, (RawEvent, CustomEvent))]
     assert [(e.type.value, e.event if isinstance(e, RawEvent) else e.name) for e in unknown] == [
         ("RAW", {"event": "dashboard.scene", "value": 1, "seq": 9}),
         ("CUSTOM", "hermes.dashboard.scene"),

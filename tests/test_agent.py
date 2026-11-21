@@ -2,7 +2,8 @@ import asyncio
 import copy
 import inspect
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
@@ -14,6 +15,7 @@ from ag_ui.core import (
     AudioPart,
     BaseEvent,
     Context,
+    CustomEvent,
     DataSource,
     DeveloperMessage,
     ImagePart,
@@ -43,9 +45,10 @@ from ag_ui_hermes import (
     HermesTranslator,
     HookContext,
     InMemoryThreadStore,
+    InputPolicy,
     ThreadRecord,
 )
-from ag_ui_hermes.agent import _approval_choice, _idempotency_key
+from ag_ui_hermes._inputs import approval_choice, idempotency_key
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from . import connect_cases
@@ -103,12 +106,20 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
             "choices": ["once", "session", "always", "deny"],
         },
         {"event": "tool.completed", "tool": "terminal", "duration": 1.0, "error": False, "preview": "ok"},
+        {"event": "dashboard.scene", "value": 1},
         {"event": "message.delta", "delta": "Deleted."},
         {"event": "run.completed", "output": "Deleted.", "completed": True},
     ]
     fake = FakeHermes(script)
     agent = make_agent(fake)
 
+    async def rename(ctx: HookContext, tool: str, preview: str, event: Mapping[str, Any]) -> tuple[str, str]:
+        return ("shell" if tool == "terminal" else tool), preview.upper()
+
+    async def scene(ctx: HookContext, event: Mapping[str, Any]) -> list[BaseEvent]:
+        return [CustomEvent(name="scene", value=event["value"])]
+
+    agent.tool_filter, agent.custom_event_mapper = rename, scene  # hooks may be async
     first: list[BaseEvent] = []
     stream = agent.run(agent_input())
     async for event in stream:
@@ -129,7 +140,7 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     always = [ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always"})]
     rejected = await collect(agent.run(agent_input("r2", resume=always)))
     assert [e.type.value for e in rejected] == ["RUN_STARTED", "RUN_ERROR"]
-    assert _approval_choice(ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})) == "deny"
+    assert approval_choice(ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})) == "deny"
 
     resume = [
         ResumeEntry(interrupt_id="req-1", status="resolved", payload={"approved": True}),
@@ -140,7 +151,8 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     assert approvals == [("POST", "/v1/runs/run_1/approval", {"request_id": "req-1", "choice": "once"})]
     assert len([c for c in fake.calls if c[:2] == ("POST", "/v1/runs")]) == 1
     result = next(e for e in second if isinstance(e, ToolCallResultEvent))
-    assert result.tool_call_id == tool_call.tool_call_id
+    assert (result.tool_call_id, result.content, tool_call.tool_call_name) == (tool_call.tool_call_id, "OK", "shell")
+    assert [e.name for e in second if isinstance(e, CustomEvent)] == ["scene"]
     assert text(first) == "Running it."
     assert text(second) == "Deleted."
     assert isinstance(second[-1], RunFinishedEvent)
@@ -177,7 +189,7 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     fake = FakeHermes(done, done, done)
     agent = make_agent(fake)
     agent.run_body = lambda ctx: {"instructions": "Host rules."}
-    agent.forwarded_props = frozenset({"model"})
+    agent.inputs = InputPolicy(forwarded_props={"model"})
     pixel = DataSource(value="iVBORw0KGgo=", mime_type="image/png")
     messages: list[Message] = [
         SystemMessage(id="s1", content="Be brief."),
@@ -210,11 +222,11 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     assert body["model"] == "gpt-x"
     assert "provider" not in body
 
-    agent.client_system_messages, agent.client_context, agent.client_state = True, False, False
+    agent.inputs = replace(agent.inputs, client_system_messages=True, client_context=False, client_state=False)
     await collect(agent.run(agent_input("r2", messages, **client_data)))
     assert starts()[-1]["instructions"] == "Host rules.\n\nBe brief.\n\nUse metric units."
 
-    agent.max_image_bytes, agent.max_message_image_bytes = 8, 20
+    agent.inputs = replace(agent.inputs, max_image_bytes=8, max_message_image_bytes=20)
     audio = UserMessage(id="u2", content=[TextPart(text="listen"), AudioPart(source=pixel)])
     remote = UserMessage(id="u3", content=[ImagePart(source=UrlSource(value="http://169.254.169.254/a.png"))])
     large = UserMessage(id="u4", content=[ImagePart(source=DataSource(value="A" * 16, mime_type="image/png"))])
@@ -222,19 +234,20 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     padded = UserMessage(id="u6", content=[ImagePart(source=DataSource(value="A" * 16 + "=" * 64, mime_type="image/png"))])
     stub = UserMessage(id="u7", content=[ImagePart(source=DataSource(value="A", mime_type="image/png"))])
     raw = UserMessage(id="u8", content=[ImagePart(source=UrlSource(value="data:image/svg+xml,<svg/>"))])
-    for bad in (
-        agent_input("r3", [stub]),
-        agent_input("r3", [raw]),
-        agent_input("r3", [audio]),
-        agent_input("r3", forwarded_props={"model": 4}),
-        agent_input("r3", [remote]),
-        agent_input("r3", [large]),
-        agent_input("r3", [many]),
-        agent_input("r3", [padded]),
+    for bad, reason in (
+        (agent_input("r3", [stub]), "invalid_image"),
+        (agent_input("r3", [raw]), "unsupported_media"),
+        (agent_input("r3", [audio]), "unsupported_media"),
+        (agent_input("r3", forwarded_props={"model": 4}), "bad_forwarded_props"),
+        (agent_input("r3", [remote]), "unsupported_media"),
+        (agent_input("r3", [large]), "image_too_large"),
+        (agent_input("r3", [many]), "image_too_large"),
+        (agent_input("r3", [padded]), "invalid_image"),
     ):
-        with pytest.raises(AgentInputError):
+        with pytest.raises(AgentInputError) as refused:
             await agent.open_run(bad)
-    agent.allow_image_urls = True
+        assert refused.value.reason == reason
+    agent.inputs = replace(agent.inputs, allow_image_urls=True)
     await collect(await agent.open_run(agent_input("r4", [remote])))
     assert starts()[-1]["input"][0]["content"][0]["image_url"]["url"] == "http://169.254.169.254/a.png"
 
@@ -243,7 +256,7 @@ async def test_requests_are_pinned_when_authorized() -> None:
     fake = FakeHermes([{"event": "run.completed", "output": "ok", "completed": True}])
     agent = make_agent(fake)
 
-    async def authorize(ctx: HookContext) -> bool:
+    def authorize(ctx: HookContext) -> bool:  # hooks may be sync
         return ctx.thread_id == "t1"
 
     agent.authorize = authorize
@@ -253,7 +266,7 @@ async def test_requests_are_pinned_when_authorized() -> None:
     assert text(await collect(events)) == "ok"
     assert await agent.store.get("t2") is None
     assert next(b for m, p, b in fake.calls if (m, p) == ("POST", "/v1/runs"))["input"] == "Hi"
-    assert _idempotency_key("a\0b", "c") != _idempotency_key("a", "b\0c")
+    assert idempotency_key("a\0b", "c") != idempotency_key("a", "b\0c")
 
 
 def apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
@@ -378,7 +391,7 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     unfiltered = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r4", messages=[]))))[1]
     assert isinstance(unfiltered, MessagesSnapshotEvent)
     assert [m.role for m in unfiltered.messages] == ["user", "assistant", "assistant", "assistant"]
-    agent.restore_tool_results = True
+    agent.inputs = InputPolicy(restore_tool_results=True)
     restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r5", messages=[]))))[1]
     assert isinstance(restored, MessagesSnapshotEvent)
     assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3", "hermes:msg:4"]
@@ -452,7 +465,7 @@ async def test_suspend_never_restores_an_answered_older_or_foreign_approval() ->
     # B persisted later / A answered by another client / the thread moved on to another run
     for owner, cursor, pending, answered in [("run_1", 5, ["B"], []), ("run_1", 2, [], ["A"]), ("run_2", -1, [], [])]:
         stale = ThreadRecord(run_id=owner, cursor=cursor, pending_interrupts=pending, answered_interrupts=answered)
-        await agent.store.put_if_run("t1", stale, None)
+        await agent.store.compare_and_set("t1", stale, None)
         assert await agent._suspend("t1", t, 2) is False
         record = await agent.store.get("t1")
         assert record
@@ -524,7 +537,7 @@ async def test_stop_endpoint_cancels_the_run() -> None:
         late = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r0"})
         assert late.json() == {"stopped": False}
         unnamed = await client.post("/agent/stop", json={"threadId": "t1"})
-        assert unnamed.status_code == 422
+        assert (unnamed.status_code, unnamed.json()["error"]["reason"]) == (400, "malformed_body")
         stopped = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r1"})
         response = await run
 
@@ -567,7 +580,10 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
         assert caps["custom"] == {"hermes": {"model": "hermes-agent"}}
         invalid = await client.post("/agent", json=no_text, headers=owner)
         assert invalid.status_code == 400
-        assert invalid.json()["error"]["code"] == "invalid_input"
+        assert invalid.json()["error"] == {"code": "invalid_input", "message": "The request has no user message to send.", "reason": "no_user_message"}
+        for malformed in (json.dumps({"threadId": "t1"}), "{not json"):
+            bad = await client.post("/agent/connect", content=malformed, headers=owner)
+            assert (bad.status_code, bad.json()["error"]["reason"]) == (400, "malformed_body")
         assert not any(path.endswith("/stop") for _, path, _ in fake.calls)  # validated before stopping run_1
         rejoin = asyncio.create_task(client.post("/agent/connect", json=agent_input("r3").model_dump(mode="json", by_alias=True), headers=owner))
         await asyncio.sleep(0.05)
