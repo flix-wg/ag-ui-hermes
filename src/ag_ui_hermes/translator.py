@@ -562,8 +562,9 @@ class HermesTranslator:
     def _approval_request(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         request_id = event.get("request_id")
         iid = request_id if isinstance(request_id, str) and request_id else f"{self.id_prefix}approval:{key}"
-        # Hermes names no tool call, so bind only when exactly one call is open.
-        bound = self._open_calls[0] if len(self._open_calls) == 1 else None
+        # Hermes names no tool call, so bind only when exactly one call is open and no
+        # evicted part of the backlog could have opened another.
+        bound = self._open_calls[0] if len(self._open_calls) == 1 and not self.truncated else None
         tool = event.get("tool")
         if bound and (bound.hidden or (isinstance(tool, str) and tool and tool != bound.raw_name)):
             bound = None

@@ -81,7 +81,7 @@ replays the backlog from seq 0; if the client already holds messages of that Her
 
 **Approvals.** The interrupt id is the Hermes `request_id`. Hermes does not say which tool call
 an approval belongs to, so only when exactly one visible tool call is open (and matches the
-approval's `tool`, if it names one) does the interrupt get `reason: "tool_call"` and `toolCallId`,
+approval's `tool`, if it names one) and the backlog was not truncated does the interrupt get `reason: "tool_call"` and `toolCallId`,
 which assistant-ui renders as a tool approval; otherwise it is `reason: "confirmation"`. `message`
 holds the description and command; `metadata` carries `command`, `description`, `pattern_key` and
 `choices`. Resuming with `{"approved": true}` means `once`; `{"approved": false}` or a cancelled

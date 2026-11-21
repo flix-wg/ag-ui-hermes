@@ -4,12 +4,15 @@ from ag_ui.core import (
     AssistantMessage,
     BaseEvent,
     CustomEvent,
+    FunctionCall,
     Message,
     MessagesSnapshotEvent,
     RunFinishedEvent,
     TextMessageContentEvent,
+    ToolCall,
     ToolCallResultEvent,
     ToolCallStartEvent,
+    ToolMessage,
     UserMessage,
 )
 
@@ -138,8 +141,13 @@ def test_rejoin_replaces_the_clients_copy_with_a_full_replay() -> None:
 
 def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     t = HermesTranslator("r")
-    held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id="r:msg:2", content="Hel")]
-    events = t.start("thread", "agui-run", held)
+    held: list[Message] = [
+        UserMessage(id="u1", content="Hi"),
+        AssistantMessage(id="r:msg:0", tool_calls=[ToolCall(id="r:tool:0", function=FunctionCall(name="a", arguments="{}"))]),
+        ToolMessage(id="r:tool:0:result", tool_call_id="r:tool:0", content="done"),
+        AssistantMessage(id="r:msg:2", content="Hel"),
+    ]
+    events = t.start("thread", "agui-run", held, replay=True)
     for seq, event in enumerate([
         {"event": "message.delta", "delta": "lo wor"},  # the segment opened at seq 2, now evicted
         {"event": "message.delta", "delta": "ld"},
@@ -148,5 +156,16 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
         events += t.feed({**event, "seq": seq})
 
     assert not [e for e in events if isinstance(e, TextMessageContentEvent)]
-    snapshot = next(e for e in events if isinstance(e, MessagesSnapshotEvent))
-    assert [(m.id, m.content) for m in snapshot.messages] == [("u1", "Hi"), ("r:final", "Hello world")]
+    snapshots = [e for e in events if isinstance(e, MessagesSnapshotEvent)]
+    assert len(snapshots) == 1
+    assert [m.id for m in snapshots[0].messages] == ["u1", "r:msg:0", "r:tool:0:result", "r:final"]
+    assert snapshots[0].messages[-1].content == "Hello world"
+
+    # Another call may have opened in the evicted part, so the approval is not bound.
+    approval = HermesTranslator("r")
+    approval.start("thread", "agui-run")
+    approval.feed({"event": "tool.started", "tool": "terminal", "seq": 7})
+    finished = approval.feed({"event": "approval.request", "request_id": "q1", "tool": "terminal", "seq": 8})[-1]
+    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert finished.outcome.type == "interrupt"
+    assert (finished.outcome.interrupts[0].reason, finished.outcome.interrupts[0].tool_call_id) == ("confirmation", None)

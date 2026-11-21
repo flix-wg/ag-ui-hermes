@@ -57,7 +57,7 @@ client last saw it). The text segment whose first delta was evicted has an unkno
 streamed under an invented one; the next tool call, reasoning or interim message restores normal
 ids. `run.completed` then sends a `MESSAGES_SNAPSHOT` that puts the canonical `output` in place of
 the stale text and corrects held messages whose text changed, keeping held tool calls and results
-the replay did not rebuild.
+the replay did not rebuild. An approval after truncation is never bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the
 agent polls the run status until it is terminal and emits the final output.
