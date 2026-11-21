@@ -33,4 +33,5 @@ First release.
 - A resume that answers an interrupt the thread neither waits on nor has answered is refused with `invalid_input`.
 - `tool_filter` also applies to the session history `connect` restores; restored tool arguments are always `"{}"`.
 - `InMemoryThreadStore` never evicts a thread with a live run; at the cap it grows and logs a warning.
-- Logs never contain request bodies, headers or tokens; the host owns its logging.
+- The adapter never logs request bodies, headers or tokens. Exceptions from stores and hooks are logged with their traceback, verbatim; the host owns its logging.
+- `tool_filter` hides tool results in restored history, since stored rows lack the preview a filter may hide by.
