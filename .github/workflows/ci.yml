@@ -70,11 +70,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - run: npm run typecheck --if-present
-      # TODO(js lane): wire up publint and @arethetypeswrong/cli once they are
-      # devDependencies, e.g. `npx publint` and `npx attw --pack .`.
-      - name: publint / attw (placeholder)
-        run: echo "publint and attw are not wired up yet"
+      - run: npm run typecheck
+      - run: npm run lint:package
+      - run: npm run test:compat
 
   build:
     name: build packages
