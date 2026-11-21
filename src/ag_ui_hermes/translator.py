@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import sys
+import time
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from ag_ui.core import (
+    PROTOCOL_VERSION,
     AssistantMessage,
     BaseEvent,
     CustomEvent,
@@ -14,6 +18,7 @@ from ag_ui.core import (
     Interrupt,
     Message,
     MessagesSnapshotEvent,
+    RawEvent,
     ReasoningEndEvent,
     ReasoningMessage,
     ReasoningMessageContentEvent,
@@ -34,6 +39,7 @@ from ag_ui.core import (
     TextMessageContentEvent,
     TextMessageEndEvent,
     TextMessageStartEvent,
+    TokenUsage,
     ToolCall,
     ToolCallEndEvent,
     ToolCallResultEvent,
@@ -60,6 +66,41 @@ _SUBAGENT_KEYS = (
     "input_tokens", "output_tokens", "reasoning_tokens", "api_calls", "cost_usd",
 )
 _APPROVAL_KEYS = ("command", "description", "pattern_key", "pattern_keys", "choices", "smart_denied")
+_MAX_COUNT = 2**53 - 1
+
+
+def run_started(thread_id: str, run_id: str) -> RunStartedEvent:
+    """``RUN_STARTED`` declaring the AG-UI protocol version this adapter speaks."""
+    return RunStartedEvent(thread_id=thread_id, run_id=run_id, protocol_version=PROTOCOL_VERSION)
+
+
+def token_usage(status: Mapping[str, Any]) -> list[TokenUsage] | None:
+    """Hermes ``usage`` and served ``runtime`` of a terminal run as AG-UI token usage.
+
+    Hermes already counts cache reads and writes into ``input_tokens``. It reports a
+    counter it lacks as ``0``, so a zero cache count and an all-zero entry are dropped.
+    """
+    usage, runtime = status.get("usage"), status.get("runtime")
+    if not isinstance(usage, Mapping):
+        return None
+
+    def count(key: str) -> int | None:
+        value = usage.get(key)
+        ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_COUNT
+        return value if ok else None
+
+    entry: dict[str, Any] = {"input_tokens": count("input_tokens"), "output_tokens": count("output_tokens")}
+    if not entry["input_tokens"] and not entry["output_tokens"]:
+        return None
+    if entry["input_tokens"] is not None and entry["output_tokens"] is not None:
+        entry["total_tokens"] = min(entry["input_tokens"] + entry["output_tokens"], _MAX_COUNT)
+    entry["cached_input_tokens"] = count("cache_read_tokens") or None
+    entry["cache_write_input_tokens"] = count("cache_write_tokens") or None
+    if isinstance(runtime, Mapping):
+        for key in ("provider", "model"):
+            if isinstance(runtime.get(key), str) and runtime[key]:
+                entry[key] = runtime[key]
+    return [TokenUsage(**{k: v for k, v in entry.items() if v is not None})]
 
 
 @dataclass
@@ -120,11 +161,21 @@ class HermesTranslator:
         tool_filter: ToolFilter | None = None,
         custom_event_mapper: CustomEventMapper | None = None,
         passthrough_unknown: bool = False,
+        raw_unknown: bool = False,
+        approval_choices: Collection[str] | None = None,
+        approval_timeout: float | None = None,
     ) -> None:
         self.hermes_run_id = hermes_run_id
         self.tool_filter = tool_filter
         self.custom_event_mapper = custom_event_mapper
         self.passthrough_unknown = passthrough_unknown
+        """Forward events nothing maps as ``CUSTOM`` ``hermes.<event>``."""
+        self.raw_unknown = raw_unknown
+        """Forward events nothing maps as ``RAW`` with ``source="hermes"``."""
+        self.approval_choices = None if approval_choices is None else frozenset(approval_choices)
+        """Choices an interrupt's ``responseSchema`` offers, of those Hermes allows; ``None`` offers all."""
+        self.approval_timeout = approval_timeout
+        """Seconds Hermes waits on an approval, for ``expiresAt``; ``None`` sets none."""
         self.thread_id = ""
         self.run_id = ""
         self.last_seq = -1
@@ -140,6 +191,9 @@ class HermesTranslator:
         self._known_text: dict[str, str] = {}
         self._known_calls: set[str] = set()
         self._known_results: dict[str, str] = {}
+        self._backlog_start = sys.maxsize
+        """First seq of a truncated backlog; calls with a lower seq had their start evicted."""
+        self._replayed_results: set[str] = set()
         self._reset_pending = False
         self._held_stale = False
         """A message the client holds has more or other text than it shows."""
@@ -175,10 +229,7 @@ class HermesTranslator:
         self.pending_interrupts.clear()
         if self._segment is not None:
             self._segment.announced = False
-        events: list[BaseEvent] = [RunStartedEvent(thread_id=thread_id, run_id=run_id)]
-        for sub in self._subagents.values():
-            events.append(self._subagent_started(sub))
-        return events
+        return [run_started(thread_id, run_id), *(self._subagent_started(s) for s in self._subagents.values())]
 
     def feed(self, event: Mapping[str, Any]) -> list[BaseEvent]:
         self.completed_tool = None
@@ -203,6 +254,7 @@ class HermesTranslator:
         if not isinstance(seq, int) or seq <= self.last_seq:
             return False
         if self.last_seq < 0 and seq > 0:
+            self._backlog_start = seq
             self._truncate()
         self.last_seq = seq
         return True
@@ -259,16 +311,20 @@ class HermesTranslator:
             mapped = self.custom_event_mapper(event)
             if mapped is not None:
                 return list(mapped)
+        unknown: list[BaseEvent] = []
+        if self.raw_unknown:
+            unknown.append(RawEvent(event=dict(event), source="hermes"))
         if self.passthrough_unknown:
-            return [CustomEvent(name=f"hermes.{name}", value=dict(event))]
-        return []
+            unknown.append(CustomEvent(name=f"hermes.{name}", value=dict(event)))
+        return unknown
 
     def interrupt(self) -> list[BaseEvent]:
         """End the AG-UI run with an interrupt for every pending approval."""
         if not self.pending_interrupts or self.done:
             return []
         events = self._close_text()
-        ids = list(self.pending_interrupts)
+        # Hermes names no subagent, so only a lone open subagent can own the approvals.
+        ids = list(self.pending_interrupts) if len(self._subagents) == 1 else None
         for sub in self._subagents.values():
             events.append(
                 SubagentFinishedEvent(
@@ -306,14 +362,17 @@ class HermesTranslator:
             )
         self._subagents.clear()
         error = str(status.get("error") or f"Hermes run {state}")
+        usage = token_usage(status)
         if state == "completed":
             outcome: Any = RunFinishedSuccessOutcome()
         elif state == "cancelled":
             outcome = RunFinishedCancelledOutcome()
         else:
-            events.append(RunErrorEvent(message=error, code=state))
+            events.append(RunErrorEvent(message=error, code=state, usage=usage))
             return events
-        events.append(RunFinishedEvent(thread_id=self.thread_id, run_id=self.run_id, outcome=outcome))
+        events.append(
+            RunFinishedEvent(thread_id=self.thread_id, run_id=self.run_id, outcome=outcome, usage=usage)
+        )
         return events
 
     def messages(self) -> list[Message]:
@@ -494,18 +553,32 @@ class HermesTranslator:
         return events
 
     def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
-        """The oldest unfinished call the client holds for a completion whose start was evicted."""
+        """The oldest unfinished call the client holds for a completion whose start was evicted.
+
+        Only calls started before the backlog qualify. A completion repeating a result the
+        client holds is that call's replay and is dropped; it never lands on a later call.
+        """
         view = self._view(event)
-        finished = {m.tool_call_id for m in self._prior if isinstance(m, ToolMessage)}
-        finished |= {c.id for c in self._order if isinstance(c, _ToolCall)}
-        held = (
-            c for m in self._prior
-            if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix)
-            for c in m.tool_calls or ()
-            if view and c.function.name == view[0] and c.id not in finished
-        )
-        call = next(held, None)
-        return _ToolCall(call.id, str(event.get("tool") or "tool"), call.function.name, False) if call else None
+        if view is None:
+            return None
+        held_results = {m.tool_call_id: m.content for m in self._prior if isinstance(m, ToolMessage)}
+        done = {c.id for c in self._order if isinstance(c, _ToolCall)} | self._replayed_results
+        for m in self._prior:
+            if not isinstance(m, AssistantMessage) or not m.id.startswith(self.id_prefix):
+                continue
+            for c in m.tool_calls or ():
+                if c.function.name != view[0] or c.id in done or not self._evicted(c.id):
+                    continue
+                if c.id not in held_results:
+                    return _ToolCall(c.id, str(event.get("tool") or "tool"), c.function.name, False)
+                if held_results[c.id] == view[1]:
+                    self._replayed_results.add(c.id)
+                    return None
+        return None
+
+    def _evicted(self, call_id: str) -> bool:
+        key = call_id.removeprefix(f"{self.id_prefix}tool:")
+        return not key.isdigit() or int(key) < self._backlog_start
 
     def _open_visible_call(self, prefer: str | None = None) -> _ToolCall | None:
         visible = [c for c in self._open_calls if not c.hidden]
@@ -526,7 +599,8 @@ class HermesTranslator:
         if known is not None:
             self._held_stale = self._held_stale or known != text
             return events
-        return events + [
+        return [
+            *events,
             ReasoningStartEvent(message_id=rid),
             ReasoningMessageStartEvent(message_id=rid, role="reasoning"),
             ReasoningMessageContentEvent(message_id=rid, delta=text),
@@ -603,6 +677,29 @@ class HermesTranslator:
             reason="tool_call" if bound else "confirmation",
             message=": ".join(parts) or "Approval required",
             tool_call_id=bound.id if bound else None,
+            response_schema=self._response_schema(event),
+            expires_at=self._expires_at(event),
             metadata=metadata,
         )
         return self.interrupt()
+
+    def _response_schema(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        """``{"choice": ...}`` over the choices Hermes offers and the host allows."""
+        offered = event.get("choices")
+        if not isinstance(offered, list) or not offered:
+            offered = ["once", "deny"]
+        allowed = self.approval_choices
+        choices = [c for c in offered if isinstance(c, str) and (allowed is None or c in allowed or c == "deny")]
+        return {
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": choices or ["deny"]}},
+            "required": ["choice"],
+        }
+
+    def _expires_at(self, event: Mapping[str, Any]) -> str | None:
+        if self.approval_timeout is None:
+            return None
+        sent = event.get("timestamp")
+        sent = sent if isinstance(sent, (int, float)) and not isinstance(sent, bool) else time.time()
+        expires = datetime.fromtimestamp(sent + self.approval_timeout, UTC)
+        return expires.isoformat(timespec="milliseconds").replace("+00:00", "Z")
