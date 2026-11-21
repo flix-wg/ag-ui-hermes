@@ -215,6 +215,7 @@ class HermesTranslator:
         self._order: list[_Segment | _ToolCall | _Reasoning] = []
         self._segment: _Segment | None = None
         self._open_calls: list[_ToolCall] = []
+        self._call_ids: set[str] = set()
         self._subagents: dict[str, _Subagent] = {}
         self._local = 0
 
@@ -495,13 +496,14 @@ class HermesTranslator:
         events = self._close_text()
         view = self._view(event)
         raw = str(event.get("tool") or "tool")
-        call = _ToolCall(
-            id=f"{self.id_prefix}tool:{key}",
-            raw_name=raw,
-            name=view[0] if view else raw,
-            hidden=view is None,
-            source_id=_source_id(event),
-        )
+        source = _source_id(event)
+        # An id from Hermes survives in the call id, so a completion still finds its call
+        # after the backlog lost the start; a repeated id falls back to the seq.
+        cid = f"{self.id_prefix}tool:id:{source}" if source is not None else None
+        if cid is None or cid in self._call_ids:
+            cid = f"{self.id_prefix}tool:{key}"
+        self._call_ids.add(cid)
+        call = _ToolCall(id=cid, raw_name=raw, name=view[0] if view else raw, hidden=view is None, source_id=source)
         seg = self._segment or self._new_segment(f"{self.id_prefix}msg:{key}")
         seg.tool_calls.append(call)
         self._open_calls.append(call)
@@ -557,28 +559,34 @@ class HermesTranslator:
         return events
 
     def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
-        """The oldest unfinished call the client holds for a completion whose start was evicted.
+        """The unfinished call the client holds for a completion whose start was evicted.
 
-        Only calls started before the backlog qualify. A completion repeating a result the
-        client holds is that call's replay and is dropped; it never lands on a later call.
+        A completion with an id takes the call with that id. Without one, only a lone
+        unfinished call of the tool started before the backlog qualifies. A completion
+        repeating a result the client holds is that call's replay and is dropped: a result
+        is dropped rather than put on a call it may not belong to.
         """
         view = self._view(event)
         if view is None:
             return None
+        name, result = view
+        source = _source_id(event)
+        wanted = None if source is None else f"{self.id_prefix}tool:id:{source}"
+
+        def owns(c: ToolCall) -> bool:
+            return c.id == wanted if wanted else c.function.name == name and self._evicted(c.id)
+
         held_results = {m.tool_call_id: m.content for m in self._prior if isinstance(m, ToolMessage)}
         done = {c.id for c in self._order if isinstance(c, _ToolCall)} | self._replayed_results
-        for m in self._prior:
-            if not isinstance(m, AssistantMessage) or not m.id.startswith(self.id_prefix):
-                continue
-            for c in m.tool_calls or ():
-                if c.function.name != view[0] or c.id in done or not self._evicted(c.id):
-                    continue
-                if c.id not in held_results:
-                    return _ToolCall(c.id, str(event.get("tool") or "tool"), c.function.name, False)
-                if held_results[c.id] == view[1]:
-                    self._replayed_results.add(c.id)
-                    return None
-        return None
+        held_calls = [c for m in self._prior if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix) for c in m.tool_calls or ()]
+        candidates = [c for c in held_calls if c.id not in done and owns(c)]
+        if replayed := next((c for c in candidates if held_results.get(c.id) == result), None):
+            self._replayed_results.add(replayed.id)
+            return None
+        unfinished = [c for c in candidates if c.id not in held_results]
+        if len(unfinished) != 1:
+            return None
+        return _ToolCall(unfinished[0].id, str(event.get("tool") or "tool"), unfinished[0].function.name, False)
 
     def _evicted(self, call_id: str) -> bool:
         key = call_id.removeprefix(f"{self.id_prefix}tool:")

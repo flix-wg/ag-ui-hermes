@@ -81,22 +81,30 @@ refused with `invalid_input` (HTTP 400).
 
 Tool previews and results go to the client as Hermes sends them. Use `tool_filter` to hide or
 rewrite tools whose output the user should not see. It applies to live and replayed runs and
-to the session history `connect` restores. Restored tool calls always carry `"{}"` as
-arguments, and a restored result whose call is unknown or hidden is left out.
+to the session history `connect` restores. Stored rows keep no preview, so restored calls pass
+the filter with an empty one, and while a filter is set no tool result is restored at all: a
+call your filter hides by its preview cannot leak its result. Restored tool calls always carry
+`"{}"` as arguments.
 
 ## Errors and logs
 
 `RUN_ERROR` and the endpoint's error bodies carry a fixed message and a stable `code`, never
 exception text, Hermes URLs or Hermes error bodies. The cause goes to the `ag_ui_hermes` logger
-and to `on_error`. Exceptions are logged with `exc_info`, so tracebacks and Hermes error
-messages reach the log. The logs can contain thread ids, Hermes run ids and those messages, but
-never request bodies, headers or tokens. The host owns its logging configuration, so treat
-these logs like application logs with user data.
+and to `on_error`. Exceptions are logged with `exc_info`, so tracebacks and exception
+messages reach the log verbatim: Hermes error messages, and whatever your store, hooks or
+`state_provider` put into theirs. The adapter itself logs thread ids and Hermes run ids, never
+request bodies, headers or tokens, but it cannot scrub a secret out of another component's
+exception. Keep credentials out of exception messages (a database URL with a password, say),
+or add a `logging.Filter` to the `ag_ui_hermes` logger. Treat these logs like application logs
+with user data.
 
 ## Resource use
 
 `InMemoryThreadStore` evicts idle threads beyond `max_threads` records but never a thread with
-a live run. If every record is live it grows past `max_threads` and logs a warning. A rejoin replays at most Hermes' 1000 events per run. Status polling of a run whose stream
+a live run. If every record is live it grows past `max_threads` and logs a warning. A run
+that ends frees its thread even when the client leaves on the last event or the final state
+refresh fails. A run whose last client left before it ended keeps its record until the thread
+is used again, so a rejoin can still replay it; under churn, use a store that expires records. A rejoin replays at most Hermes' 1000 events per run. Status polling of a run whose stream
 is gone, and a status call that stalls, stop after `poll_timeout`. Rate limiting and request size limits are up to your server.
 
 ## Reporting

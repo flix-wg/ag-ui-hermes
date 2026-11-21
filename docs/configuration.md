@@ -41,7 +41,7 @@ HermesAgent(client, *, store=None, authorize=None, tool_filter=None, custom_even
 | --- | --- | --- |
 | `store` | `InMemoryThreadStore()` | See [Thread store](#thread-store). |
 | `authorize` | none | `async (ctx) -> bool`. See [security.md](security.md). |
-| `tool_filter` | none | `(ctx, tool, preview, event) -> (tool, preview) \| None`. Called on `tool.started` (`None` hides the whole call) and on `tool.completed` (`None` hides only the result). |
+| `tool_filter` | none | `(ctx, tool, preview, event) -> (tool, preview) \| None`. Called on `tool.started` (`None` hides the whole call) and on `tool.completed` (`None` hides only the result). Restored session history passes calls with an empty preview and restores no results while a filter is set. |
 | `custom_event_mapper` | none | `(ctx, event) -> list[BaseEvent] \| None` for Hermes events the translator does not know. `None` falls through. |
 | `passthrough_unknown` | `False` | Forward unknown Hermes events as `CUSTOM` named `hermes.<event>`. |
 | `raw_unknown` | `False` | Forward unknown Hermes events as `RAW` with `source="hermes"`. |
@@ -93,7 +93,7 @@ How a `RunAgentInput` becomes a `POST /v1/runs` body:
   Images are accepted as inline data (`data:image/...`). Each may be up to `max_image_bytes`
   (default 5 MiB) and one message's images up to `max_message_image_bytes` (default 20 MiB);
   `None` disables a limit. `http(s)` image URLs are refused unless `allow_image_urls=True`,
-  because Hermes would fetch them. Anything else, or an image over a limit, is `invalid_input`
+  because Hermes would fetch them. Anything else, inline data that is not base64, or an image over a limit, is `invalid_input`
   (HTTP 400).
 - **History.** Only the last user message is sent; the Hermes session holds the rest. When the
   store knows no session for the thread, earlier user and assistant text goes as

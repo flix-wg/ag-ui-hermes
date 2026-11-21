@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -59,6 +60,7 @@ _STARTED_HISTORY = 32
 _CAS_ATTEMPTS = 50
 """Compare-and-set retries on one thread record before giving up."""
 _FORWARDABLE = frozenset({"model", "provider", "model_options"})
+_BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
 
 
 @dataclass(frozen=True)
@@ -296,7 +298,7 @@ class HermesAgent:
             # An id another client already answered is a late repeat, not an error.
             if not set(answers) <= {*record.pending_interrupts, *record.answered_interrupts}:
                 raise AgentInputError("The resume answers an interrupt this thread is not waiting on")
-            return self._resume(ctx, answers)
+            return self._resume(ctx, answers, record.run_id)
         record = await self.store.get(input.thread_id) or ThreadRecord()
         earlier = record.started.get(input.run_id)
         if earlier is None and record.run_id and input.run_id in record.agui_run_ids:
@@ -337,8 +339,9 @@ class HermesAgent:
         except asyncio.CancelledError:
             launch.add_done_callback(partial(_log_launch, input.thread_id))
             raise
-        async for event in self._stream(ctx, self._translator(ctx, run_id)):
-            yield event
+        async with aclosing(self._stream(ctx, self._translator(ctx, run_id))) as events:
+            async for event in events:
+                yield event
 
     async def _launch(
         self,
@@ -403,11 +406,11 @@ class HermesAgent:
             await self._stop_quietly(previous)
         return True
 
-    async def _resume(self, ctx: HookContext, answers: dict[str, str]) -> AsyncGenerator[BaseEvent, None]:
+    async def _resume(self, ctx: HookContext, answers: dict[str, str], validated: str) -> AsyncGenerator[BaseEvent, None]:
         input = _input(ctx)
         record = await self.store.get(input.thread_id)
-        if record is None or record.run_id is None:
-            raise AgentInputError("No interrupted Hermes run for this thread")
+        if record is None or record.run_id != validated:
+            raise AgentInputError("The thread moved on to another Hermes run since the resume was validated")
         answers = {i: c for i, c in answers.items() if i in record.pending_interrupts}
         for request_id, choice in answers.items():
             try:
@@ -426,8 +429,9 @@ class HermesAgent:
         unanswered = [i for i in record.pending_interrupts if i not in answers]
         await self._attach(input, record.run_id)
         translator = self._translator(ctx, record.run_id)
-        async for event in self._stream(ctx, translator, silent_until=record.cursor, reask=unanswered):
-            yield event
+        async with aclosing(self._stream(ctx, translator, silent_until=record.cursor, reask=unanswered)) as events:
+            async for event in events:
+                yield event
 
     def _instructions(self, input: RunAgentInput, host: Any) -> str:
         """Hermes ``instructions``: the host's, opted-in system/developer messages, and fenced client data."""
@@ -476,8 +480,9 @@ class HermesAgent:
             yield RunFinishedEvent(thread_id=input.thread_id, run_id=input.run_id, outcome=RunFinishedSuccessOutcome())
             return
         await self._attach(input, record.run_id)
-        async for event in self._stream(ctx, self._translator(ctx, record.run_id)):
-            yield event
+        async with aclosing(self._stream(ctx, self._translator(ctx, record.run_id))) as events:
+            async for event in events:
+                yield event
 
     async def _history(self, ctx: HookContext, session_id: str) -> list[Message]:
         """The session's stored conversation, or nothing if the client cannot provide it."""
@@ -513,8 +518,21 @@ class HermesAgent:
         """Feed the run's events from seq 0; those up to ``silent_until`` only rebuild state.
 
         Once the replay reaches ``silent_until``, the approval in ``reask`` that Hermes still
-        waits on ends the run again.
+        waits on ends the run again. A run that ended releases the thread, even when the
+        client left at the end or the last state refresh failed.
         """
+        try:
+            async with aclosing(self._follow(ctx, t, silent_until, reask)) as events:
+                async for event in events:
+                    yield event
+        finally:
+            if t.done:
+                try:
+                    await self._release(ctx.thread_id, t.hermes_run_id)
+                except Exception as exc:
+                    self._report(ctx, exc)
+
+    async def _follow(self, ctx: HookContext, t: HermesTranslator, silent_until: int, reask: Collection[str]) -> AsyncGenerator[BaseEvent, None]:
         input = _input(ctx)
         run_id = t.hermes_run_id
         opened = False
@@ -526,7 +544,8 @@ class HermesAgent:
                     seq = event.get("seq")
                     silent = isinstance(seq, int) and seq <= silent_until
                     if reask and not silent:  # the replay passed the interrupt
-                        held, reask = await self._reasked(run_id, held, reask), ()
+                        lost = t.last_seq < 0 and isinstance(seq, int) and seq > silent_until + 1
+                        held, reask = await self._reasked(run_id, held, reask, lost=lost), ()
                         if held:
                             break
                     approval = event.get("event") == "approval.request"
@@ -594,7 +613,6 @@ class HermesAgent:
                 if deadline is not None and loop.time() >= deadline:
                     raise RunTimeoutError(f"Hermes run {run_id} still {status.get('status')!r} after {self.poll_timeout}s")
                 await asyncio.sleep(self.poll_interval if deadline is None else min(self.poll_interval, deadline - loop.time()))
-        await self._release(input.thread_id, run_id)
 
     async def _fed(self, thread_id: str, t: HermesTranslator, event: Mapping[str, Any], *, polled: bool = False) -> list[BaseEvent]:
         """Translate ``event``, persisting an interrupt before the client sees it and leaves.
@@ -639,21 +657,33 @@ class HermesAgent:
         """Persist ``t``'s interrupt; ``False`` if it is stale and must not reach the client.
 
         Stale means answered, older than an approval another client persisted, or of a run
-        the thread no longer owns.
+        the thread no longer owns. A polled approval has no seq to order it by, so when another
+        approval is stored the run status decides which one Hermes still waits on.
         """
-        already_stored = False
+        already_stored = contested = False
 
-        def suspend(record: ThreadRecord) -> bool:
-            nonlocal already_stored
+        def suspend(record: ThreadRecord, *, current: bool = False) -> bool:
+            nonlocal already_stored, contested
             pending = [i for i in t.pending_interrupts if i not in record.answered_interrupts]
-            already_stored = False
+            already_stored = contested = False
+            if polled and not current and any(i not in pending for i in record.pending_interrupts):
+                contested = True
+                return False
             if cursor < record.cursor and not polled:  # another client persisted a newer approval meanwhile
                 already_stored = any(i in record.pending_interrupts for i in pending)
                 return False
             record.cursor, record.pending_interrupts = max(cursor, record.cursor), pending
             return bool(pending)
 
-        return await self._update(thread_id, t.hermes_run_id, suspend) or already_stored
+        if await self._update(thread_id, t.hermes_run_id, suspend) or already_stored:
+            return True
+        if not contested:
+            return False
+        status = await self.client.get_run(t.hermes_run_id)
+        approval = status.get("approval")
+        if status.get("status") != "waiting_for_approval" or not isinstance(approval, dict) or approval.get("request_id") not in t.pending_interrupts:
+            return False
+        return await self._update(thread_id, t.hermes_run_id, partial(suspend, current=True))
 
     async def _release(self, thread_id: str, run_id: str) -> None:
         def release(record: ThreadRecord) -> None:
@@ -687,12 +717,18 @@ class HermesAgent:
         sent[:] = [state]
         return [StateSnapshotEvent(snapshot=state)]
 
-    async def _reasked(self, run_id: str, held: list[Mapping[str, Any]], reask: Collection[str]) -> list[Mapping[str, Any]]:
-        """The approval of ``reask`` Hermes still waits on: its replayed event, or the status's if the backlog lost it."""
+    async def _reasked(self, run_id: str, held: list[Mapping[str, Any]], reask: Collection[str], *, lost: bool = False) -> list[Mapping[str, Any]]:
+        """The approval Hermes still waits on, if the live stream will not repeat it.
+
+        That is one of ``reask`` (its replayed event, or the status's if the backlog lost it),
+        or any approval when ``lost`` events after the interrupt could have held its request.
+        """
         status = await self.client.get_run(run_id)
         approval = status.get("approval")
-        if status.get("status") != "waiting_for_approval" or not isinstance(approval, dict) or approval.get("request_id") not in reask:
+        if status.get("status") != "waiting_for_approval" or not isinstance(approval, dict):
             return []
+        if approval.get("request_id") not in reask:
+            return [approval] if lost else []
         return [e for e in held if e.get("request_id") == approval["request_id"]] or [approval]
 
     async def _approval_pending(self, run_id: str, event: Mapping[str, Any]) -> bool:
@@ -857,20 +893,20 @@ def _image_url(source: Any, allow_urls: bool) -> tuple[str, int]:
 
 def _base64_size(data: str) -> int:
     data = "".join(data.split())
-    return len(data) * 3 // 4 - (len(data) - len(data.rstrip("=")))
+    if not _BASE64.fullmatch(data):
+        raise AgentInputError("Inline image data is not valid base64")
+    return len(data.rstrip("=")) * 3 // 4
 
 
 def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None) -> list[Message]:
     """AG-UI messages for stored Hermes session rows (user, assistant with tool calls, tool).
 
-    Tool calls and results pass ``tool_filter`` as on the live stream, which never sends
-    arguments either; a result whose call is unknown or hidden is left out.
+    Tool calls pass ``tool_filter`` with an empty preview, since stored rows keep none, and
+    carry no arguments, as on the live stream. A filter may hide a call by its preview, so
+    with a filter set no result is restored; without one, a result whose call is unknown is
+    left out.
     """
-
-    def view(tool: str, preview: str, event: Mapping[str, Any]) -> tuple[str, str] | None:
-        return tool_filter(tool, preview, event) if tool_filter else (tool, preview)
-
-    tools: dict[str, str] = {}  # visible call id -> stored tool name
+    visible: set[str] = set()  # restored call ids
     out: list[Message] = []
     for row in rows:
         mid, role, content = f"hermes:msg:{row.get('id')}", row.get("role"), row.get("content")
@@ -889,15 +925,14 @@ def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[
                     continue
                 name = str(c["function"].get("name") or "tool")
                 event = {"event": "tool.started", "tool": name, "preview": "", "arguments": c["function"].get("arguments")}
-                if (shown := view(name, "", event)) is not None:
-                    tools[c["id"]] = name
+                shown = tool_filter(name, "", event) if tool_filter else (name, "")
+                if shown is not None:
+                    visible.add(c["id"])
                     calls.append(ToolCall(id=c["id"], function=FunctionCall(name=shown[0], arguments="{}")))
             if text or calls:
                 out.append(AssistantMessage(id=mid, content=text or None, tool_calls=calls or None))
-        elif role == "tool" and (tool := tools.get(str(row.get("tool_call_id")))) is not None:
-            shown = view(tool, text, {"event": "tool.completed", "tool": tool, "preview": text})
-            if shown is not None:
-                out.append(ToolMessage(id=mid, content=shown[1], tool_call_id=str(row["tool_call_id"])))
+        elif role == "tool" and tool_filter is None and str(row.get("tool_call_id")) in visible:
+            out.append(ToolMessage(id=mid, content=text, tool_call_id=str(row["tool_call_id"])))
     return out
 
 

@@ -308,3 +308,22 @@ def test_completions_pair_with_their_start_by_id() -> None:
     starts = {e.metadata["preview"]: e.tool_call_id for e in events if isinstance(e, ToolCallStartEvent) and e.metadata}
     results = {e.content: e.tool_call_id for e in events if isinstance(e, ToolCallResultEvent)}
     assert results == {"hall on": starts["hall"], "kitchen on": starts["kitchen"]}
+
+
+def test_evicted_completions_pair_by_id_and_never_by_guess() -> None:
+    def results(starts: list[dict[str, Any]], completions: list[dict[str, Any]]) -> list[tuple[str, Any]]:
+        shown = HermesTranslator("r")
+        shown.start("thread", "agui-run")
+        for seq, event in enumerate(starts):
+            shown.feed({**event, "event": "tool.started", "tool": "a", "seq": seq})
+        t = HermesTranslator("r")
+        out = t.start("thread", "agui-run", [UserMessage(id="u1", content="Hi"), *shown.messages()], replay=True)
+        for seq, event in enumerate(completions, start=5):  # both starts were evicted
+            out += t.feed({**event, "event": "tool.completed", "tool": "a", "seq": seq})
+        return [(e.tool_call_id, e.content) for e in out if isinstance(e, ToolCallResultEvent)]
+
+    assert results([{"id": "c1"}, {"id": "c2"}], [{"id": "c2", "preview": "two"}, {"id": "c1", "preview": "one"}]) == [
+        ("r:tool:id:c2", "two"),
+        ("r:tool:id:c1", "one"),
+    ]
+    assert results([{}, {}], [{"preview": "two"}]) == []  # without ids either call could own it

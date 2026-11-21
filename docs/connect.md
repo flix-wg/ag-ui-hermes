@@ -23,8 +23,9 @@ just drops the HTTP stream, and the server never stops a Hermes run because its 
 load), a `MESSAGES_SNAPSHOT` of the session's stored conversation (`GET
 /api/sessions/{id}/messages`, the latest 500 rows; ids `hermes:msg:<row id>`) comes between them.
 A client that already holds messages keeps them, as on every other path. The restored tool calls
-and results go through `tool_filter` like live ones. Their arguments are always `"{}"`, and a
-result whose call is unknown or hidden is omitted. A `RunsClient` without
+go through `tool_filter` with an empty preview (stored rows keep none) and their arguments are
+always `"{}"`. Because a filter may hide a call by its preview, no tool result is restored when
+`tool_filter` is set; without one, a result whose call is unknown is omitted. A `RunsClient` without
 `session_messages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
 streams every event through a fresh translator, then follows the live stream.
 
@@ -60,9 +61,11 @@ the resume left a pending approval unanswered and `GET /v1/runs/{id}` still says
 `waiting_for_approval` with that approval's `request_id`, the replay stops at the interrupt and
 ends the run with it again: Hermes never repeats an `approval.request` on the live stream, so
 waiting would hang until it times out. If the backlog has lost that `approval.request`, the
-approval in the run status is used instead. A resume that names an interrupt id the thread
+approval in the run status is used instead, as is any approval the status names when the
+backlog lost the events after the interrupt (Hermes moved on to it outside this adapter). A resume that names an interrupt id the thread
 neither waits on nor has answered is refused with `invalid_input` (HTTP 400); a late repeat of
-an answered id is not an error.
+an answered id is not an error. A resume whose thread switched to a newer run between the
+request's validation and its stream ends with `RUN_ERROR` `invalid_input`, and answers nothing.
 
 If the backlog no longer starts at seq 0 (Hermes keeps 1000 events, and says `replay.truncated`),
 the replay cannot rebuild what the client holds, so there is no snapshot: the client keeps its
@@ -71,8 +74,10 @@ client last saw it). The text segment whose first delta was evicted has an unkno
 streamed under an invented one; the next tool call, reasoning or interim message restores normal
 ids. `run.completed` then sends a `MESSAGES_SNAPSHOT` that puts the canonical `output` in place of
 the stale text and corrects held messages whose text changed, keeping held tool calls and results
-the replay did not rebuild. A tool completion whose start was evicted attaches to the oldest
-unfinished call of that tool the client holds, or is dropped. An approval after truncation is never
+the replay did not rebuild. A tool completion whose start was evicted attaches to the held call with
+its `tool_call_id` (see [events](events.md)). Without an id it attaches only when the client holds
+exactly one unfinished call of that tool started before the backlog; otherwise it is dropped,
+never put on a call it may not belong to. An approval after truncation is never
 bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the

@@ -217,12 +217,14 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     remote = UserMessage(id="u3", content=[ImagePart(source=UrlSource(value="http://169.254.169.254/a.png"))])
     large = UserMessage(id="u4", content=[ImagePart(source=DataSource(value="A" * 16, mime_type="image/png"))])
     many = UserMessage(id="u5", content=[ImagePart(source=pixel)] * 3)
+    padded = UserMessage(id="u6", content=[ImagePart(source=DataSource(value="A" * 16 + "=" * 64, mime_type="image/png"))])
     for bad in (
         agent_input("r3", [audio]),
         agent_input("r3", forwarded_props={"model": 4}),
         agent_input("r3", [remote]),
         agent_input("r3", [large]),
         agent_input("r3", [many]),
+        agent_input("r3", [padded]),
     ):
         with pytest.raises(AgentInputError):
             await agent.open_run(bad)
@@ -338,7 +340,8 @@ async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates()
 async def test_connect_without_a_live_run_restores_the_filtered_session_history() -> None:
     fake = FakeHermes([{"event": "run.completed", "output": "4", "completed": True}])
     agent = make_agent(fake)
-    agent.tool_filter = lambda ctx, tool, preview, event: None if tool == "vault" else (tool, "[redacted]")
+    # Live, this filter also hides calls by their preview, which stored rows lack.
+    agent.tool_filter = lambda ctx, tool, preview, event: None if tool == "vault" or "secret" in preview else (tool, preview)
     await collect(agent.run(agent_input()))
 
     def call(cid: str, name: str) -> dict[str, Any]:
@@ -359,17 +362,15 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     snapshot = events[1]
     assert isinstance(snapshot, MessagesSnapshotEvent)
     dumped = [m.model_dump(mode="json", by_alias=True, exclude_none=True) for m in snapshot.messages]
-    assert [(m["role"], m["id"]) for m in dumped] == [
-        ("user", "hermes:msg:1"),
-        ("assistant", "hermes:msg:2"),
-        ("tool", "hermes:msg:3"),
-        ("assistant", "hermes:msg:7"),
-    ]
+    assert [(m["role"], m["id"]) for m in dumped] == [("user", "hermes:msg:1"), ("assistant", "hermes:msg:2"), ("assistant", "hermes:msg:7")]
     assert dumped[0]["content"][1] == {"type": "image", "source": {"type": "data", "value": "AAAA", "mimeType": "image/png"}}
     assert [c["function"] for c in dumped[1]["toolCalls"]] == [{"name": "calc", "arguments": "{}"}]
-    assert dumped[2]["content"] == "[redacted]"
     held = await collect(agent.connect(agent_input("r3")))  # the client keeps what it holds
     assert [e.type.value for e in held] == ["RUN_STARTED", "RUN_FINISHED"]
+    agent.tool_filter = None  # without a filter the results come back too
+    restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r4", messages=[]))))[1]
+    assert isinstance(restored, MessagesSnapshotEvent)
+    assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3", "hermes:msg:4"]
 
 
 async def test_dropped_stream_resumes_from_last_event_id() -> None:
@@ -770,14 +771,81 @@ async def test_a_stale_resume_does_not_interrupt_a_run_another_resume_finished()
     assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == []
 
 
-async def test_a_resume_reasks_an_approval_the_backlog_lost() -> None:
-    fake = FakeHermes(approvals("Z", "A"))
+@pytest.mark.parametrize("moved_on", [False, True])
+async def test_a_resume_reasks_an_approval_the_backlog_lost(moved_on: bool) -> None:
+    fake = FakeHermes(approvals("Z", "A", "B"))
     agent = make_agent(fake)
     await at_second_approval(agent)
     run = fake.runs["run_1"]
+    if moved_on:  # A was answered outside the adapter, so Hermes now waits on B
+        await agent.client.respond_approval("run_1", request_id="A", choice="once")
+        await until(lambda: run.status.get("approval", {}).get("request_id") == "B")
     await run.emit({"event": "hermes.keepalive"})
     run.evicted = len(run.backlog) - 1  # the approval fell out of the replay backlog
-    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == ["A"]
+    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == ["B" if moved_on else "A"]
+
+
+async def test_a_resume_validated_before_the_thread_moved_on_is_refused() -> None:
+    fake = FakeHermes(approvals("A"), approvals("B"))
+    agent = make_agent(fake)
+    assert interrupts(await collect(agent.run(agent_input()))) == ["A"]
+    stale = await agent.open_run(answer("r2", "A"))
+    assert interrupts(await collect(agent.run(agent_input("r3")))) == ["B"]  # replaces run_1
+    refused = await asyncio.wait_for(collect(stale), 2)
+    assert isinstance(refused[-1], RunErrorEvent)
+    assert refused[-1].code == "invalid_input"
+    assert not await agent.stop("t1", "r2")
+    assert [path for _, path, _ in fake.calls if path.endswith("/approval")] == []
+
+
+async def test_a_delayed_polled_approval_never_overwrites_a_newer_one() -> None:
+    fake = FakeHermes(approvals("A", "B"))
+    agent = make_agent(fake)
+    assert interrupts(await collect(agent.run(agent_input()))) == ["A"]
+    await agent.client.respond_approval("run_1", request_id="A", choice="once")  # outside the adapter
+    await until(lambda: fake.runs["run_1"].status.get("approval", {}).get("request_id") == "B")
+
+    def polled(request_id: str) -> HermesTranslator:
+        t = HermesTranslator("run_1")
+        t.start("t1", "r9")
+        t.feed({"event": "approval.request", "request_id": request_id})
+        return t
+
+    assert await agent._suspend("t1", polled("B"), -1, polled=True)  # replaces the stale A
+    assert not await agent._suspend("t1", polled("A"), -1, polled=True)  # a poll answered before B
+    record = await agent.store.get("t1")
+    assert record
+    assert record.pending_interrupts == ["B"]
+
+
+async def test_a_finished_run_releases_its_thread_even_if_its_stream_ends_early() -> None:
+    done: list[Step] = [{"event": "message.delta", "delta": "ok"}, {"event": "run.completed", "output": "ok", "completed": True}]
+    fake = FakeHermes(done, done)
+    agent = make_agent(fake)
+
+    async def owner() -> str | None:
+        record = await agent.store.get("t1")
+        assert record
+        return record.run_id
+
+    stream = agent.run(agent_input())
+    async for event in stream:
+        if isinstance(event, RunFinishedEvent):
+            break
+    await stream.aclose()  # the client leaves on RUN_FINISHED
+    assert await owner() is None
+
+    refreshes: list[Any] = [{}]
+
+    async def provider(ctx: HookContext) -> Any:
+        if not refreshes:
+            raise RuntimeError("state backend down")  # the refresh before RUN_FINISHED
+        return refreshes.pop()
+
+    agent.state_provider = provider
+    failed = await collect(agent.run(agent_input("r2")))
+    assert isinstance(failed[-1], RunErrorEvent)
+    assert await owner() is None
 
 
 async def test_js_connect_probe_fixture_is_current() -> None:

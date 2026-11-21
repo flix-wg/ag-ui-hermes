@@ -31,15 +31,14 @@ same ids:
 | | |
 | --- | --- |
 | Text message | `<run>:msg:<seq>` |
-| Tool call / its result | `<run>:tool:<seq>` / `<run>:tool:<seq>:result` |
+| Tool call / its result | `<run>:tool:id:<id>` when `tool.started` carries a `tool_call_id` (or `id`) not used before in the run, else `<run>:tool:<seq>`; the result adds `:result` |
 | Reasoning | `<run>:reasoning:<seq>` |
 | Subagent | `<run>:subagent:<key>`, the key being Hermes `subagent_id`, else `<delegation_id>:<task_index>`, else the seq |
 | Final output not streamed | `<run>:final` |
 | Restored session history | `hermes:msg:<row id>` |
 
 A `tool.completed` pairs with its start by the event's `tool_call_id` (or `id`) when both carry
-one. Otherwise it takes the earliest open call of the same tool name. The AG-UI ids above do not
-change either way.
+one. Otherwise it takes the earliest open call of the same tool name.
 
 With a `state_provider`, a final `STATE_DELTA` or `STATE_SNAPSHOT` precedes `RUN_FINISHED` and
 `RUN_ERROR` from a Hermes run end. Errors raised by the adapter itself get none.

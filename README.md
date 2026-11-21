@@ -156,7 +156,7 @@ with `RUN_ERROR`. Its `message` is fixed and its `code` is one of:
 
 | `code` | Meaning |
 | --- | --- |
-| `invalid_input` | Nothing to send or resume, an unsupported input part, an image that is not allowed or too large, a disallowed or conflicting approval choice, or a resume naming an unknown interrupt. |
+| `invalid_input` | Nothing to send or resume, an unsupported input part, an image that is not allowed, not base64 or too large, a disallowed or conflicting approval choice, a resume naming an unknown interrupt, or a resume whose thread moved on to a newer run. |
 | `forbidden` | `authorize` refused the request. |
 | `hermes_unreachable` | Transport failure talking to Hermes. A start with an idempotency key is retried first. |
 | `hermes_rejected` | Hermes answered with an HTTP error status. |
@@ -167,7 +167,7 @@ with `RUN_ERROR`. Its `message` is fixed and its `code` is one of:
 | `failed`, `interrupted` | The Hermes run itself ended that way. |
 
 `RUN_ERROR` never carries exception text, Hermes URLs or Hermes error bodies. The cause goes
-to the `ag_ui_hermes` logger (with tracebacks, never request bodies, headers or tokens) and to `on_error`. A Hermes error on `/capabilities` or `/stop`
+to the `ag_ui_hermes` logger (with tracebacks; the adapter adds no request bodies, headers or tokens, see [security](docs/security.md)) and to `on_error`. A Hermes error on `/capabilities` or `/stop`
 answers HTTP 502. All exceptions derive from `HermesError`.
 
 ## Reconnect and stop
