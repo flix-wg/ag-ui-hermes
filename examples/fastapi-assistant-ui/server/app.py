@@ -30,8 +30,8 @@ async def authorize(ctx: HookContext) -> bool:
     user: str | None = ctx.request.headers.get("x-demo-user") if ctx.request is not None else None
     if not user:
         return False
-    if ctx.action == "capabilities":  # concerns no thread
-        return True
+    if ctx.thread_id is None:  # capabilities concern no thread
+        return ctx.action == "capabilities"
     return owners.setdefault(ctx.thread_id, user) == user
 
 
