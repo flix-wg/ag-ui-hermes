@@ -121,6 +121,8 @@ class _ToolCall:
     hidden: bool
     result: str | None = None
     error: bool = False
+    source_id: str | None = None
+    """The event's own ``tool_call_id``/``id``, which pairs a completion with its start."""
 
     @property
     def result_id(self) -> str:
@@ -502,7 +504,7 @@ class HermesTranslator:
         raw = str(event.get("tool") or "tool")
         call = _ToolCall(
             id=f"{self.id_prefix}tool:{key}", raw_name=raw, name=view[0] if view else raw,
-            hidden=view is None,
+            hidden=view is None, source_id=_source_id(event),
         )
         seg = self._segment or self._new_segment(f"{self.id_prefix}msg:{key}")
         seg.tool_calls.append(call)
@@ -522,7 +524,9 @@ class HermesTranslator:
     def _tool_completed(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         raw = str(event.get("tool") or "tool")
         self.completed_tool = raw
-        call = next((c for c in self._open_calls if c.raw_name == raw), None)
+        source = _source_id(event)
+        call = next((c for c in self._open_calls if source is not None and c.source_id == source), None)
+        call = call or next((c for c in self._open_calls if c.raw_name == raw and (source is None or c.source_id is None)), None)
         events: list[BaseEvent] = []
         if call is None and self.truncated:
             call = self._held_call(event)
@@ -714,3 +718,8 @@ class HermesTranslator:
         sent = sent if isinstance(sent, (int, float)) and not isinstance(sent, bool) else time.time()
         expires = datetime.fromtimestamp(sent + self.approval_timeout, UTC)
         return expires.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _source_id(event: Mapping[str, Any]) -> str | None:
+    value = event.get("tool_call_id") or event.get("id")
+    return str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) else None

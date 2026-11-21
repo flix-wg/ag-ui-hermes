@@ -246,3 +246,15 @@ def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
         {"event": "tool.completed", "tool": "a", "preview": "first"},
         {"event": "tool.completed", "tool": "a", "preview": "second"},
     ], start=2) == [("r:tool:1", "second")]
+
+
+def test_completions_pair_with_their_start_by_id() -> None:
+    events = feed_all(HermesTranslator("run_1"), [
+        {"event": "tool.started", "tool": "light", "preview": "kitchen", "id": "c1"},
+        {"event": "tool.started", "tool": "light", "preview": "hall", "tool_call_id": "c2"},
+        {"event": "tool.completed", "tool": "light", "preview": "hall on", "tool_call_id": "c2"},
+        {"event": "tool.completed", "tool": "light", "preview": "kitchen on", "id": "c1"},
+    ])
+    starts = {e.metadata["preview"]: e.tool_call_id for e in events if isinstance(e, ToolCallStartEvent) and e.metadata}
+    results = {e.content: e.tool_call_id for e in events if isinstance(e, ToolCallResultEvent)}
+    assert results == {"hall on": starts["hall"], "kitchen on": starts["kitchen"]}
