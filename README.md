@@ -7,7 +7,8 @@ approval), so any AG-UI frontend, such as `@assistant-ui/react-ag-ui`, can drive
 
 - `HermesTranslator`: pure, I/O-free mapping from Hermes run events to AG-UI events. You can feed
   it any Hermes-shaped event stream.
-- `HermesRunsClient`: async httpx client for `/v1/runs`.
+- `HermesRunsClient`: async httpx client for `/v1/runs`. `HermesAgent` only needs the
+  `RunsClient` protocol it implements, so a host can back the agent with its own bridge.
 - `HermesAgent`: AG-UI `run` / `connect` / `stop` with a pluggable thread store.
 - `ag_ui_hermes.endpoint.add_hermes_fastapi_endpoint` (extra `[fastapi]`).
 - `js/`: npm package `ag-ui-hermes` with a `HermesAgent` (an `HttpAgent` that implements `connect()`).

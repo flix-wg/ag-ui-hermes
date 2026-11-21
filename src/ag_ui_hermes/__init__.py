@@ -1,7 +1,7 @@
 """AG-UI adapter for the Hermes Agent ``/v1/runs`` API."""
 
 from .agent import HermesAgent, StateProvider, approval_choice
-from .client import HermesAPIError, HermesError, HermesRunsClient, RunStreamGone, StartedRun
+from .client import HermesAPIError, HermesError, HermesRunsClient, RunsClient, RunStreamGone, StartedRun
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
 from .translator import CustomEventMapper, HermesTranslator, ToolFilter
 
@@ -14,6 +14,7 @@ __all__ = [
     "HermesTranslator",
     "InMemoryThreadStore",
     "RunStreamGone",
+    "RunsClient",
     "StartedRun",
     "StateProvider",
     "ThreadRecord",

@@ -20,7 +20,7 @@ from ag_ui.core import (
     StateSnapshotEvent,
 )
 
-from .client import HermesAPIError, HermesError, HermesRunsClient, RunStreamGone
+from .client import HermesAPIError, HermesError, RunsClient, RunStreamGone
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
 from .translator import TERMINAL_STATUSES, CustomEventMapper, HermesTranslator, ToolFilter
 
@@ -41,7 +41,7 @@ class HermesAgent:
 
     def __init__(
         self,
-        client: HermesRunsClient,
+        client: RunsClient,
         *,
         store: ThreadStore | None = None,
         tool_filter: ToolFilter | None = None,
@@ -53,7 +53,7 @@ class HermesAgent:
         poll_interval: float = 1.0,
         allowed_choices: Collection[str] = ("once", "deny"),
     ) -> None:
-        self.client = client
+        self.client: RunsClient = client
         self.store: ThreadStore = store or InMemoryThreadStore()
         self.tool_filter = tool_filter
         self.custom_event_mapper = custom_event_mapper

@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -30,6 +30,37 @@ class StartedRun:
     run_id: str
     status: str
     replayed: bool
+
+
+class RunsClient(Protocol):
+    """What :class:`HermesAgent` needs from a Hermes runs backend.
+
+    :class:`HermesRunsClient` talks to Hermes directly; a host can back the agent with its
+    own bridge instead. Errors follow Hermes: raise :class:`HermesAPIError` with the HTTP
+    status (``404`` unknown run, ``409`` approval already answered or not pending) and any
+    other :class:`HermesError` for transport failures. ``events`` yields Hermes-shaped events
+    (``event``, ``seq``) from ``last_seq + 1``, returns when the stream closes and raises
+    :class:`RunStreamGone` once the run's stream is no longer available, after which the agent
+    polls ``get_run`` (``status``, ``output``, ``error``, ``approval``) until it is terminal.
+    """
+
+    async def start_run(
+        self,
+        input: str,
+        *,
+        session_id: str | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        idempotency_key: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> StartedRun: ...
+
+    async def get_run(self, run_id: str) -> dict[str, Any]: ...
+
+    async def stop_run(self, run_id: str) -> dict[str, Any]: ...
+
+    async def respond_approval(self, run_id: str, *, request_id: str, choice: str) -> dict[str, Any]: ...
+
+    def events(self, run_id: str, *, last_seq: int = -1) -> AsyncGenerator[dict[str, Any], None]: ...
 
 
 class HermesRunsClient:
