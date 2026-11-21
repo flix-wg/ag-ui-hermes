@@ -74,10 +74,10 @@ client last saw it). The text segment whose first delta was evicted has an unkno
 streamed under an invented one; the next tool call, reasoning or interim message restores normal
 ids. `run.completed` then sends a `MESSAGES_SNAPSHOT` that puts the canonical `output` in place of
 the stale text and corrects held messages whose text changed, keeping held tool calls and results
-the replay did not rebuild. A tool completion whose start was evicted attaches to the held call with
-its `tool_call_id` (see [events](events.md)). Without an id it attaches only when the client holds
-exactly one unfinished call of that tool started before the backlog; otherwise it is dropped,
-never put on a call it may not belong to. An approval after truncation is never
+the replay did not rebuild. A tool completion whose start was evicted attaches only when the client
+holds exactly one unfinished call started before the backlog that it can own: the one with its
+`tool_call_id` in a run that carries ids (see [events](events.md)), else the one of its tool.
+Otherwise it is dropped, never put on a call it may not belong to. An approval after truncation is never
 bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the

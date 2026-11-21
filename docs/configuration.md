@@ -90,7 +90,7 @@ How a `RunAgentInput` becomes a `POST /v1/runs` body:
 - **User turn.** The last user message becomes the Hermes `input`. It is text, or `text` and
   `image_url` parts when it carries images. An image-only message works. Audio, video and
   document parts are refused with `invalid_input`.
-  Images are accepted as inline data (`data:image/...`). Each may be up to `max_image_bytes`
+  Images are accepted as inline base64 data (`data:image/...;base64,`). Each may be up to `max_image_bytes`
   (default 5 MiB) and one message's images up to `max_message_image_bytes` (default 20 MiB);
   `None` disables a limit. `http(s)` image URLs are refused unless `allow_image_urls=True`,
   because Hermes would fetch them. Anything else, inline data that is not base64, or an image over a limit, is `invalid_input`

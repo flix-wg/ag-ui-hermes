@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -67,6 +68,9 @@ class FakeRun:
     async def sse(self, last_seq: int, drop_after: int | None) -> AsyncIterator[bytes]:
         yield b": open\n\n"
         next_seq = max(last_seq + 1, self.evicted)
+        if len(self.backlog) > next_seq > last_seq + 1:  # unsequenced, before the retained events
+            marker = {"event": "replay.truncated", "run_id": self.run_id, "timestamp": time.time(), "oldest_retained_seq": next_seq}
+            yield f"data: {json.dumps({**marker, 'requested_seq': last_seq} if last_seq >= 0 else marker)}\n\n".encode()
         while True:
             async with self.changed:
 

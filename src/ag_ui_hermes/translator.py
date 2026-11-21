@@ -215,7 +215,8 @@ class HermesTranslator:
         self._order: list[_Segment | _ToolCall | _Reasoning] = []
         self._segment: _Segment | None = None
         self._open_calls: list[_ToolCall] = []
-        self._call_ids: set[str] = set()
+        self._ids = False
+        """A tool event of this run carried a tool-call id, so completions pair by id only."""
         self._subagents: dict[str, _Subagent] = {}
         self._local = 0
 
@@ -497,12 +498,10 @@ class HermesTranslator:
         view = self._view(event)
         raw = str(event.get("tool") or "tool")
         source = _source_id(event)
-        # An id from Hermes survives in the call id, so a completion still finds its call
-        # after the backlog lost the start; a repeated id falls back to the seq.
-        cid = f"{self.id_prefix}tool:id:{source}" if source is not None else None
-        if cid is None or cid in self._call_ids:
-            cid = f"{self.id_prefix}tool:{key}"
-        self._call_ids.add(cid)
+        self._ids = self._ids or source is not None
+        # The event's id survives in the call id, so a completion still finds its call after
+        # the backlog lost the start.
+        cid = f"{self.id_prefix}tool:{key}" + (f":id:{source}" if source is not None else "")
         call = _ToolCall(id=cid, raw_name=raw, name=view[0] if view else raw, hidden=view is None, source_id=source)
         seg = self._segment or self._new_segment(f"{self.id_prefix}msg:{key}")
         seg.tool_calls.append(call)
@@ -525,8 +524,11 @@ class HermesTranslator:
         raw = str(event.get("tool") or "tool")
         self.completed_tool = raw
         source = _source_id(event)
-        call = next((c for c in self._open_calls if source is not None and c.source_id == source), None)
-        call = call or next((c for c in self._open_calls if c.raw_name == raw and (source is None or c.source_id is None)), None)
+        self._ids = self._ids or source is not None
+        if self._by_id():
+            call = next((c for c in self._open_calls if source is not None and c.source_id == source), None)
+        else:
+            call = next((c for c in self._open_calls if c.raw_name == raw), None)
         events: list[BaseEvent] = []
         if call is None and self.truncated:
             call = self._held_call(event)
@@ -558,28 +560,40 @@ class HermesTranslator:
         )
         return events
 
+    def _held_calls(self) -> list[ToolCall]:
+        return [c for m in self._prior if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix) for c in m.tool_calls or ()]
+
+    def _by_id(self) -> bool:
+        """Completions pair by id only once the run carried one, here or in the evicted part."""
+        return self._ids or (self.truncated and any(self._call_key(c.id)[1] is not None for c in self._held_calls()))
+
+    def _call_key(self, call_id: str) -> tuple[int | None, str | None]:
+        """The seq and the event's id a call id was made from."""
+        seq, _, source = call_id.removeprefix(f"{self.id_prefix}tool:").partition(":id:")
+        return (int(seq) if seq.isdigit() else None), source or None
+
     def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
         """The unfinished call the client holds for a completion whose start was evicted.
 
-        A completion with an id takes the call with that id. Without one, only a lone
-        unfinished call of the tool started before the backlog qualifies. A completion
-        repeating a result the client holds is that call's replay and is dropped: a result
-        is dropped rather than put on a call it may not belong to.
+        Only a lone unfinished call started before the backlog qualifies: the one with the
+        completion's id or, in a run without ids, the one of its tool. A completion repeating
+        a result the client holds is that call's replay and is dropped: a result is dropped
+        rather than put on a call it may not belong to.
         """
         view = self._view(event)
         if view is None:
             return None
         name, result = view
-        source = _source_id(event)
-        wanted = None if source is None else f"{self.id_prefix}tool:id:{source}"
+        source, by_id = _source_id(event), self._by_id()
 
         def owns(c: ToolCall) -> bool:
-            return c.id == wanted if wanted else c.function.name == name and self._evicted(c.id)
+            seq, held_source = self._call_key(c.id)
+            evicted = seq is not None and seq < self._backlog_start
+            return evicted and (source is not None and held_source == source if by_id else c.function.name == name)
 
         held_results = {m.tool_call_id: m.content for m in self._prior if isinstance(m, ToolMessage)}
         done = {c.id for c in self._order if isinstance(c, _ToolCall)} | self._replayed_results
-        held_calls = [c for m in self._prior if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix) for c in m.tool_calls or ()]
-        candidates = [c for c in held_calls if c.id not in done and owns(c)]
+        candidates = [c for c in self._held_calls() if c.id not in done and owns(c)]
         if replayed := next((c for c in candidates if held_results.get(c.id) == result), None):
             self._replayed_results.add(replayed.id)
             return None
@@ -587,10 +601,6 @@ class HermesTranslator:
         if len(unfinished) != 1:
             return None
         return _ToolCall(unfinished[0].id, str(event.get("tool") or "tool"), unfinished[0].function.name, False)
-
-    def _evicted(self, call_id: str) -> bool:
-        key = call_id.removeprefix(f"{self.id_prefix}tool:")
-        return not key.isdigit() or int(key) < self._backlog_start
 
     def _open_visible_call(self, prefer: str | None = None) -> _ToolCall | None:
         visible = [c for c in self._open_calls if not c.hidden]

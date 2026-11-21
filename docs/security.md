@@ -71,7 +71,7 @@ in `forwarded_props` (none by default).
 
 ## Images
 
-By default only inline `data:image/...` images are accepted: up to `max_image_bytes` (5 MiB)
+By default only inline base64 `data:image/...;base64,` images are accepted: up to `max_image_bytes` (5 MiB)
 each and `max_message_image_bytes` (20 MiB) per message. `None` disables a limit. `http(s)`
 image URLs would make Hermes or its model provider fetch a client-chosen URL, so they are
 refused unless you set `allow_image_urls=True`. Everything else, and anything over a limit, is

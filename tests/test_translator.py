@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 from ag_ui.core import (
     AssistantMessage,
     BaseEvent,
@@ -323,7 +324,49 @@ def test_evicted_completions_pair_by_id_and_never_by_guess() -> None:
         return [(e.tool_call_id, e.content) for e in out if isinstance(e, ToolCallResultEvent)]
 
     assert results([{"id": "c1"}, {"id": "c2"}], [{"id": "c2", "preview": "two"}, {"id": "c1", "preview": "one"}]) == [
-        ("r:tool:id:c2", "two"),
-        ("r:tool:id:c1", "one"),
+        ("r:tool:1:id:c2", "two"),
+        ("r:tool:0:id:c1", "one"),
     ]
     assert results([{}, {}], [{"preview": "two"}]) == []  # without ids either call could own it
+
+
+def secret(tool: str, preview: str, _event: object) -> tuple[str, str] | None:
+    return None if preview == "secret" else (tool, preview)
+
+
+@pytest.mark.parametrize(
+    ("run", "held", "backlog"),
+    [
+        # An identified completion whose start was evicted, while an anonymous call is open.
+        ([{"event": "tool.started", "id": "c1"}, {"event": "tool.started"}, {"event": "tool.completed", "id": "c1", "preview": "one"}], 2, 1),
+        # An anonymous completion of a hidden call, before a held call with an id starts in the backlog.
+        ([{"event": "tool.started", "preview": "secret"}, {"event": "tool.completed", "preview": "one"}, {"event": "tool.started", "id": "c2"}], 3, 1),
+        # Hermes reuses the id of a call whose start was evicted.
+        (
+            [
+                {"event": "tool.started", "id": "c1"},
+                {"event": "tool.completed", "id": "c1", "preview": "one"},
+                {"event": "tool.started", "id": "c1"},
+                {"event": "tool.completed", "id": "c1", "preview": "two"},
+            ],
+            3,
+            2,
+        ),
+    ],
+)
+def test_a_truncated_replay_puts_results_where_the_live_run_did(run: list[dict[str, Any]], held: int, backlog: int) -> None:
+    def results(events: list[BaseEvent]) -> list[tuple[str, Any]]:
+        return [(e.tool_call_id, e.content) for e in events if isinstance(e, ToolCallResultEvent)]
+
+    live, replay = HermesTranslator("r", tool_filter=secret), HermesTranslator("r", tool_filter=secret)
+    live.start("thread", "agui-run")
+    after: list[BaseEvent] = []
+    for seq, event in enumerate(run):
+        out = live.feed({"tool": "a", **event, "seq": seq})
+        after += out if seq >= backlog else []
+        if seq == held - 1:
+            client = live.messages()
+    out = replay.start("thread", "agui-run", [UserMessage(id="u1", content="Hi"), *client], replay=True)
+    for seq in range(backlog, len(run)):
+        out += replay.feed({"tool": "a", **run[seq], "seq": seq})
+    assert results(out) == results(after)

@@ -3,8 +3,10 @@ import copy
 import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from functools import partial
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from ag_ui.core import (
@@ -218,7 +220,11 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     large = UserMessage(id="u4", content=[ImagePart(source=DataSource(value="A" * 16, mime_type="image/png"))])
     many = UserMessage(id="u5", content=[ImagePart(source=pixel)] * 3)
     padded = UserMessage(id="u6", content=[ImagePart(source=DataSource(value="A" * 16 + "=" * 64, mime_type="image/png"))])
+    stub = UserMessage(id="u7", content=[ImagePart(source=DataSource(value="A", mime_type="image/png"))])
+    raw = UserMessage(id="u8", content=[ImagePart(source=UrlSource(value="data:image/svg+xml,<svg/>"))])
     for bad in (
+        agent_input("r3", [stub]),
+        agent_input("r3", [raw]),
         agent_input("r3", [audio]),
         agent_input("r3", forwarded_props={"model": 4}),
         agent_input("r3", [remote]),
@@ -798,6 +804,13 @@ async def test_a_resume_validated_before_the_thread_moved_on_is_refused() -> Non
     assert [path for _, path, _ in fake.calls if path.endswith("/approval")] == []
 
 
+def polled(request_id: str) -> HermesTranslator:
+    t = HermesTranslator("run_1")
+    t.start("t1", "r9")
+    t.feed({"event": "approval.request", "request_id": request_id})
+    return t
+
+
 async def test_a_delayed_polled_approval_never_overwrites_a_newer_one() -> None:
     fake = FakeHermes(approvals("A", "B"))
     agent = make_agent(fake)
@@ -805,17 +818,80 @@ async def test_a_delayed_polled_approval_never_overwrites_a_newer_one() -> None:
     await agent.client.respond_approval("run_1", request_id="A", choice="once")  # outside the adapter
     await until(lambda: fake.runs["run_1"].status.get("approval", {}).get("request_id") == "B")
 
-    def polled(request_id: str) -> HermesTranslator:
-        t = HermesTranslator("run_1")
-        t.start("t1", "r9")
-        t.feed({"event": "approval.request", "request_id": request_id})
-        return t
-
-    assert await agent._suspend("t1", polled("B"), -1, polled=True)  # replaces the stale A
-    assert not await agent._suspend("t1", polled("A"), -1, polled=True)  # a poll answered before B
+    assert await agent._suspend("t1", polled("B"), -1, recheck=partial(agent.client.get_run, "run_1"))  # replaces the stale A
+    assert not await agent._suspend("t1", polled("A"), -1, recheck=partial(agent.client.get_run, "run_1"))  # a poll answered before B
     record = await agent.store.get("t1")
     assert record
     assert record.pending_interrupts == ["B"]
+
+
+async def test_a_confirmed_polled_approval_never_overwrites_one_persisted_meanwhile() -> None:
+    fake = FakeHermes(approvals("A", "B", "C"))
+    client = RacingClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport()))
+    agent = HermesAgent(client, poll_interval=0.01)
+    assert interrupts(await collect(agent.run(agent_input()))) == ["A"]
+    run = fake.runs["run_1"]
+    await client.respond_approval("run_1", request_id="A", choice="once")
+    await until(lambda: run.status.get("approval", {}).get("request_id") == "B")
+
+    async def another_subscriber_persists_c() -> None:  # after the recheck confirmed B
+        await client.respond_approval("run_1", request_id="B", choice="once")
+        await until(lambda: run.status.get("approval", {}).get("request_id") == "C")
+        streamed = HermesTranslator("run_1")
+        streamed.start("t1", "r8")
+        streamed.feed(run.backlog[-1])
+        assert await agent._suspend("t1", streamed, run.backlog[-1]["seq"])
+
+    client.hook = another_subscriber_persists_c
+    assert not await agent._suspend("t1", polled("B"), -1, recheck=partial(agent.client.get_run, "run_1"))
+    record = await agent.store.get("t1")
+    assert record
+    assert record.pending_interrupts == ["C"]
+
+
+async def test_a_stalled_recheck_of_a_contested_approval_still_times_out() -> None:
+    fake = StreamGoneHermes(approvals("A", "B"))
+    fake.gone = False
+    client = StallingClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport()))
+    client.stall_after = 1000
+    agent = HermesAgent(client, poll_interval=0.01, poll_timeout=0.2)
+    assert interrupts(await collect(agent.run(agent_input()))) == ["A"]
+    await client.respond_approval("run_1", request_id="A", choice="once")  # outside the adapter
+    await until(lambda: fake.runs["run_1"].status.get("approval", {}).get("request_id") == "B")
+    fake.gone, client.stall_after = True, 1  # the poll sees B, the recheck against the stored A stalls
+    events = await asyncio.wait_for(collect(agent.connect(agent_input("r2"))), 2)
+    assert isinstance(events[-1], RunErrorEvent)
+    assert events[-1].code == "hermes_timeout"
+
+
+async def test_a_cancelled_final_refresh_still_releases_the_thread() -> None:
+    fake = FakeHermes([{"event": "run.completed", "output": "ok", "completed": True}])
+    agent = HermesAgent(HermesRunsClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport())), store=SlowStore())
+    refreshing = asyncio.Event()
+    opened: list[bool] = []
+
+    async def provider(ctx: HookContext) -> Any:
+        if opened:
+            refreshing.set()  # the refresh before RUN_FINISHED hangs until cancelled
+            await asyncio.Event().wait()
+        opened.append(True)
+        return {}
+
+    agent.state_provider = provider
+
+    async def consume() -> None:
+        await collect(agent.run(agent_input()))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(consume)
+        await refreshing.wait()
+        tasks.cancel_scope.cancel()
+
+    async def released() -> bool:
+        record = await agent.store.get("t1")
+        return record is not None and record.run_id is None
+
+    await until(released)
 
 
 async def test_a_finished_run_releases_its_thread_even_if_its_stream_ends_early() -> None:

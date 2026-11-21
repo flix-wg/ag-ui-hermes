@@ -8,11 +8,11 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from ag_ui.core import (
     AgentCapabilities,
@@ -60,7 +60,8 @@ _STARTED_HISTORY = 32
 _CAS_ATTEMPTS = 50
 """Compare-and-set retries on one thread record before giving up."""
 _FORWARDABLE = frozenset({"model", "provider", "model_options"})
-_BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_BASE64 = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ RunBody = Callable[[HookContext], Mapping[str, Any]]
 """Extra ``POST /v1/runs`` body fields."""
 ErrorHook = Callable[[HookContext, Exception], None]
 """Sees every error the agent reports; its own exceptions are logged and ignored."""
+_StatusFetch = Callable[[], Awaitable[dict[str, Any]]]
 
 
 class AgentInputError(HermesError):
@@ -187,7 +189,7 @@ class HermesAgent:
         """Largest decoded inline image; ``None`` for no limit."""
         self.max_message_image_bytes = max_message_image_bytes
         """Largest total of decoded inline images in one message; ``None`` for no limit."""
-        self._launches: set[asyncio.Task[str]] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()
 
     async def run(self, input: RunAgentInput, *, request: Any = None) -> AsyncGenerator[BaseEvent, None]:
         """Start a Hermes run for the last user message, or answer approvals on ``resume``.
@@ -330,15 +332,8 @@ class HermesAgent:
         extra = {**forwarded, **(self.run_body(ctx) if self.run_body else {})}
         if instructions := self._instructions(input, extra.get("instructions")):
             extra["instructions"] = instructions
-        # Shielded: a run Hermes accepted is recorded or stopped even if this request is cancelled.
-        launch = asyncio.ensure_future(self._launch(input, record, content, history, extra))
-        self._launches.add(launch)
-        launch.add_done_callback(self._launches.discard)
-        try:
-            run_id = await asyncio.shield(launch)
-        except asyncio.CancelledError:
-            launch.add_done_callback(partial(_log_launch, input.thread_id))
-            raise
+        # A run Hermes accepted is recorded or stopped even if this request is cancelled.
+        run_id = await self._shielded(self._launch(input, record, content, history, extra), f"Starting a Hermes run on thread {input.thread_id}")
         async with aclosing(self._stream(ctx, self._translator(ctx, run_id))) as events:
             async for event in events:
                 yield event
@@ -528,9 +523,20 @@ class HermesAgent:
         finally:
             if t.done:
                 try:
-                    await self._release(ctx.thread_id, t.hermes_run_id)
+                    await self._shielded(self._release(ctx.thread_id, t.hermes_run_id), f"Releasing thread {ctx.thread_id}")
                 except Exception as exc:
                     self._report(ctx, exc)
+
+    async def _shielded(self, work: Coroutine[Any, Any, _T], what: str) -> _T:
+        """Run ``work`` to its end even if the caller is cancelled; a failure after that is logged."""
+        task = asyncio.ensure_future(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(partial(_log_orphan, what))
+            raise
 
     async def _follow(self, ctx: HookContext, t: HermesTranslator, silent_until: int, reask: Collection[str]) -> AsyncGenerator[BaseEvent, None]:
         input = _input(ctx)
@@ -543,8 +549,8 @@ class HermesAgent:
                 async for event in stream:
                     seq = event.get("seq")
                     silent = isinstance(seq, int) and seq <= silent_until
-                    if reask and not silent:  # the replay passed the interrupt
-                        lost = t.last_seq < 0 and isinstance(seq, int) and seq > silent_until + 1
+                    if reask and isinstance(seq, int) and not silent:  # the replay passed the interrupt
+                        lost = t.last_seq < 0 and seq > silent_until + 1
                         held, reask = await self._reasked(run_id, held, reask, lost=lost), ()
                         if held:
                             break
@@ -589,21 +595,16 @@ class HermesAgent:
                 return
         loop = asyncio.get_running_loop()
         deadline = None if self.poll_timeout is None else loop.time() + self.poll_timeout
+        poll = partial(self._status, run_id, deadline)
         while not t.done:
             try:
-                async with asyncio.timeout_at(deadline) as bound:
-                    status = await self.client.get_run(run_id)
+                status = await poll()
             except HermesAPIError as exc:
                 if exc.status == 404:  # Hermes forgot the run; release the thread
                     await self._release(input.thread_id, run_id)
                 raise
-            except TimeoutError as exc:
-                if not bound.expired():
-                    raise
-                raise RunTimeoutError(f"Hermes run {run_id} status did not answer within {self.poll_timeout}s") from exc
-            approval = status.get("approval")
-            if status.get("status") == "waiting_for_approval" and isinstance(approval, dict):
-                for item in await self._fed(input.thread_id, t, approval, polled=True):
+            if (approval := _awaited(status)) is not None:
+                for item in await self._fed(input.thread_id, t, approval, recheck=poll):
                     yield item
                 if t.suspended:
                     return
@@ -614,19 +615,31 @@ class HermesAgent:
                     raise RunTimeoutError(f"Hermes run {run_id} still {status.get('status')!r} after {self.poll_timeout}s")
                 await asyncio.sleep(self.poll_interval if deadline is None else min(self.poll_interval, deadline - loop.time()))
 
-    async def _fed(self, thread_id: str, t: HermesTranslator, event: Mapping[str, Any], *, polled: bool = False) -> list[BaseEvent]:
+    async def _status(self, run_id: str, deadline: float | None) -> dict[str, Any]:
+        """``GET /v1/runs/{id}``, failing with ``hermes_timeout`` once ``deadline`` passes."""
+        try:
+            async with asyncio.timeout_at(deadline) as bound:
+                return await self.client.get_run(run_id)
+        except TimeoutError as exc:
+            if not bound.expired():
+                raise
+            raise RunTimeoutError(f"Hermes run {run_id} status did not answer within {self.poll_timeout}s") from exc
+
+    async def _fed(self, thread_id: str, t: HermesTranslator, event: Mapping[str, Any], *, recheck: _StatusFetch | None = None) -> list[BaseEvent]:
         """Translate ``event``, persisting an interrupt before the client sees it and leaves.
 
         An interrupt another client has already moved past (a newer approval is stored, or
-        every request in it was answered) is withdrawn and the stream continues. A ``polled``
-        approval comes from the run status: it has no seq, but is the one Hermes waits on.
+        every request in it was answered) is withdrawn and the stream continues. An approval
+        polled from the run status has no seq; ``recheck`` fetches that status again.
         """
         seq = event.get("seq")
         cursor = seq if isinstance(seq, int) else t.last_seq
-        return await self._interrupted(thread_id, t, t.feed(event), cursor, polled=polled)
+        return await self._interrupted(thread_id, t, t.feed(event), cursor, recheck=recheck)
 
-    async def _interrupted(self, thread_id: str, t: HermesTranslator, items: list[BaseEvent], cursor: int, *, polled: bool = False) -> list[BaseEvent]:
-        if not t.suspended or await self._suspend(thread_id, t, cursor, polled=polled):
+    async def _interrupted(
+        self, thread_id: str, t: HermesTranslator, items: list[BaseEvent], cursor: int, *, recheck: _StatusFetch | None = None
+    ) -> list[BaseEvent]:
+        if not t.suspended or await self._suspend(thread_id, t, cursor, recheck=recheck):
             return items
         logger.info("Dropped a stale approval interrupt of Hermes run %s", t.hermes_run_id)
         t.pending_interrupts.clear()
@@ -653,37 +666,32 @@ class HermesAgent:
 
         await self._update(input.thread_id, run_id, attach)
 
-    async def _suspend(self, thread_id: str, t: HermesTranslator, cursor: int, *, polled: bool = False) -> bool:
+    async def _suspend(self, thread_id: str, t: HermesTranslator, cursor: int, *, recheck: _StatusFetch | None = None) -> bool:
         """Persist ``t``'s interrupt; ``False`` if it is stale and must not reach the client.
 
         Stale means answered, older than an approval another client persisted, or of a run
-        the thread no longer owns. A polled approval has no seq to order it by, so when another
-        approval is stored the run status decides which one Hermes still waits on.
+        the thread no longer owns. A polled approval (``recheck`` given) has no seq to order it
+        by, so when another approval is stored the run status decides which one Hermes still
+        waits on, and the write only lands on the record that check was made against.
         """
-        already_stored = contested = False
-
-        def suspend(record: ThreadRecord, *, current: bool = False) -> bool:
-            nonlocal already_stored, contested
+        run_id = t.hermes_run_id
+        for _ in range(_CAS_ATTEMPTS):
+            record = await self.store.get(thread_id)
+            if record is None or record.run_id != run_id:
+                return False
             pending = [i for i in t.pending_interrupts if i not in record.answered_interrupts]
-            already_stored = contested = False
-            if polled and not current and any(i not in pending for i in record.pending_interrupts):
-                contested = True
+            if not pending:
                 return False
-            if cursor < record.cursor and not polled:  # another client persisted a newer approval meanwhile
-                already_stored = any(i in record.pending_interrupts for i in pending)
-                return False
+            if recheck is None and cursor < record.cursor:  # another client persisted a newer approval meanwhile
+                return any(i in record.pending_interrupts for i in pending)
+            if recheck is not None and any(i not in pending for i in record.pending_interrupts):
+                approval = _awaited(await recheck())
+                if approval is None or approval.get("request_id") not in pending:
+                    return False
             record.cursor, record.pending_interrupts = max(cursor, record.cursor), pending
-            return bool(pending)
-
-        if await self._update(thread_id, t.hermes_run_id, suspend) or already_stored:
-            return True
-        if not contested:
-            return False
-        status = await self.client.get_run(t.hermes_run_id)
-        approval = status.get("approval")
-        if status.get("status") != "waiting_for_approval" or not isinstance(approval, dict) or approval.get("request_id") not in t.pending_interrupts:
-            return False
-        return await self._update(thread_id, t.hermes_run_id, partial(suspend, current=True))
+            if await self.store.put_if_run(thread_id, record, run_id):
+                return True
+        raise StoreConflictError(f"suspending thread {thread_id} for {run_id}")
 
     async def _release(self, thread_id: str, run_id: str) -> None:
         def release(record: ThreadRecord) -> None:
@@ -723,9 +731,8 @@ class HermesAgent:
         That is one of ``reask`` (its replayed event, or the status's if the backlog lost it),
         or any approval when ``lost`` events after the interrupt could have held its request.
         """
-        status = await self.client.get_run(run_id)
-        approval = status.get("approval")
-        if status.get("status") != "waiting_for_approval" or not isinstance(approval, dict):
+        approval = _awaited(await self.client.get_run(run_id))
+        if approval is None:
             return []
         if approval.get("request_id") not in reask:
             return [approval] if lost else []
@@ -793,9 +800,15 @@ def _input(ctx: HookContext) -> RunAgentInput:
     return ctx.input
 
 
-def _log_launch(thread_id: str, launch: asyncio.Task[str]) -> None:
-    if not launch.cancelled() and (exc := launch.exception()) is not None:
-        logger.error("Starting a Hermes run on thread %s failed after its request was cancelled", thread_id, exc_info=exc)
+def _log_orphan(what: str, task: asyncio.Task[Any]) -> None:
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error("%s failed after its request was cancelled", what, exc_info=exc)
+
+
+def _awaited(status: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The approval a run status says Hermes waits on."""
+    approval = status.get("approval")
+    return approval if status.get("status") == "waiting_for_approval" and isinstance(approval, dict) else None
 
 
 async def _failing(exc: Exception) -> AsyncGenerator[BaseEvent, None]:
@@ -883,19 +896,19 @@ def _image_url(source: Any, allow_urls: bool) -> tuple[str, int]:
     if isinstance(source, UrlSource):
         url = source.value.strip()
         lowered = url.lower()
-        if lowered.startswith("data:image/") and "," in url:
-            head, data = url.split(",", 1)
-            return url, _base64_size(data) if head.lower().endswith(";base64") else len(data)
+        head, _, data = url.partition(",")
+        if lowered.startswith("data:image/") and head.lower().endswith(";base64"):
+            return url, _base64_size(data)
         if allow_urls and lowered.startswith(("http://", "https://")):
             return url, 0
-    raise AgentInputError("Image parts need inline image data" + (" or an http(s) URL" if allow_urls else ""))
+    raise AgentInputError("Image parts need inline base64 image data" + (" or an http(s) URL" if allow_urls else ""))
 
 
 def _base64_size(data: str) -> int:
     data = "".join(data.split())
-    if not _BASE64.fullmatch(data):
+    if not data or not _BASE64.fullmatch(data):
         raise AgentInputError("Inline image data is not valid base64")
-    return len(data.rstrip("=")) * 3 // 4
+    return len(data) * 3 // 4 - data.count("=")
 
 
 def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None) -> list[Message]:
