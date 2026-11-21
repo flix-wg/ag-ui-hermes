@@ -22,6 +22,8 @@ class FakeRun:
             "object": "hermes.run", "run_id": run_id, "status": "running", "session_id": session_id,
         }
         self.backlog: list[dict[str, Any]] = []
+        self.evicted = 0
+        """Seqs below this fell out of the replay backlog."""
         self.closed = False
         self.changed = asyncio.Condition()
         self.answered = asyncio.Event()
@@ -61,7 +63,7 @@ class FakeRun:
 
     async def sse(self, last_seq: int, drop_after: int | None) -> AsyncIterator[bytes]:
         yield b": open\n\n"
-        next_seq = last_seq + 1
+        next_seq = max(last_seq + 1, self.evicted)
         while True:
             async with self.changed:
                 def ready(n: int = next_seq) -> bool:
