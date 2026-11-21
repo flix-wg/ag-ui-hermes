@@ -580,8 +580,11 @@ class HermesTranslator:
         self._ids = self._ids or source is not None
         if self._by_id():
             call = next((c for c in self._open_calls if source is not None and c.source_id == source), None)
-        else:
+        elif not self._truncated:
             call = next((c for c in self._open_calls if c.raw_name == raw), None)
+        else:
+            # A start the truncation lost, maybe of a hidden call, could own the completion.
+            call = None
         events: list[BaseEvent] = []
         if call is None and self._truncated:
             call = self._held_call(event)

@@ -24,7 +24,7 @@ Use it as an async context manager or call `aclose()`, for example in a FastAPI 
 `respond_approval`, `events`), so a host can back it with its own bridge. A bridge that also
 implements `SupportsSessionMessages` (`session_messages`) lets `connect` restore history, and
 one that implements `SupportsCapabilities` (`get_capabilities`) adds what Hermes reports to
-the capabilities; the agent checks both with `isinstance`. The protocols' docstrings in
+the capabilities; the agent looks both methods up with `getattr`, so a proxy's `__getattr__` counts. The protocols' docstrings in
 [`client.py`](../src/ag_ui_hermes/client.py) give the error contract.
 
 ## `HermesAgent`
@@ -104,7 +104,7 @@ client data:
 
 | `reason` | |
 | --- | --- |
-| `malformed_body` | The endpoint could not parse the body as JSON of the right shape (`RunAgentInput`, or `{threadId, runId}` for `/stop`). |
+| `malformed_body` | The endpoint could not parse the body as JSON of the right shape (`RunAgentInput`, or `{threadId, runId}` for `/stop`), or it came without an `application/json` (or `+json`) content type. |
 | `no_user_message` | No user message with content to send. |
 | `unsupported_media` | An audio, video or document part, or an image source that is not allowed (an `http(s)` URL without `allow_image_urls`, a non-image or non-base64 data URL). |
 | `invalid_image` | Inline image data that is not base64. |

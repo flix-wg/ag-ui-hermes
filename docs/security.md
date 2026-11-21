@@ -92,9 +92,9 @@ tool results by default. `InputPolicy(restore_tool_results=True)` restores them;
 `tool_filter` as a `tool.completed` with the full stored content as its preview, so a filter
 that hides a call by its live preview should also check the result.
 
-After a truncated replay, a tool completion whose start was evicted is dropped unless a
-tool-call id ties it to its call, so a hidden call's result never lands on a visible call of the
-same tool.
+After a truncated replay, a tool completion is dropped unless a tool-call id ties it to its
+call: its start may have been evicted, and a hidden call's result must never land on a visible
+call of the same tool.
 
 ## Errors and logs
 

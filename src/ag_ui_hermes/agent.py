@@ -9,7 +9,7 @@ import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from contextlib import aclosing
 from functools import partial
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from ag_ui.core import (
     AgentCapabilities,
@@ -49,10 +49,12 @@ from ._config import (
     ToolFilter,
 )
 from ._patch import json_diff
-from .client import RunsClient, SupportsCapabilities, SupportsSessionMessages
 from .errors import AgentForbiddenError, AgentInputError, HermesAPIError, HermesError, RunStreamGoneError, RunTimeoutError, StoreConflictError
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
 from .translator import TERMINAL_STATUSES, HermesTranslator, UnknownEvents, handles, run_started
+
+if TYPE_CHECKING:
+    from .client import RunsClient
 
 logger = logging.getLogger("ag_ui_hermes")
 
@@ -162,7 +164,9 @@ class HermesAgent:
         ctx = HookContext("capabilities", None, None, None, request)
         try:
             await self._authorize(ctx)
-            hermes = await self.client.get_capabilities() if isinstance(self.client, SupportsCapabilities) else {}
+            # getattr, unlike a runtime Protocol check, also sees methods a client supplies via __getattr__.
+            get_capabilities = getattr(self.client, "get_capabilities", None)
+            hermes = await get_capabilities() if callable(get_capabilities) else {}
         except Exception as exc:
             await self._report(ctx, exc)
             raise
@@ -357,10 +361,11 @@ class HermesAgent:
 
     async def _history(self, ctx: HookContext, session_id: str) -> list[Message]:
         """The session's stored conversation, or nothing if the client cannot provide it."""
-        if not isinstance(self.client, SupportsSessionMessages):
+        session_messages = getattr(self.client, "session_messages", None)
+        if not callable(session_messages):
             return []
         try:
-            rows = await self.client.session_messages(session_id)
+            rows = await session_messages(session_id)
         except HermesError as exc:
             logger.warning("Could not load the history of Hermes session %s: %s", session_id, exc)
             return []

@@ -204,8 +204,8 @@ Details, including truncated backlogs and lost streams: [docs/connect.md](https:
   the run id and event `seq`, arguments are always `{}`, and the `preview` summary is in
   `TOOL_CALL_START.metadata`. A completion pairs with its start by `tool_call_id` or `id` when
   the event has one, and otherwise by tool name in start order, which is wrong if two calls of
-  the same tool finish out of order. After a truncated replay, a completion without an id whose
-  start was evicted is dropped. History restored on connect has Hermes' call ids and `"{}"`
+  the same tool finish out of order. After a truncated replay, a completion without an id is
+  dropped, since its start may have been evicted. History restored on connect has Hermes' call ids and `"{}"`
   arguments.
 - **Reasoning.** Not streamed: Hermes sends each reasoning block once, complete.
 - **`ACTIVITY_*` and `STEP_*` events** are not emitted.

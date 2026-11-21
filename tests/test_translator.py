@@ -270,9 +270,10 @@ def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
         return [(e.tool_call_id, e.content) for e in out if isinstance(e, ToolCallResultEvent)]
 
     first = ToolMessage(id="r:tool:0:result", tool_call_id="r:tool:0", content="first")
-    # The backlog opens on A's completion; B starts later, inside the backlog.
+    # B starts inside the backlog, but without ids a completion may still be that of another
+    # evicted call, perhaps a hidden one, so it is dropped too.
     later: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(3)]), first]
-    assert replay(
+    assert not replay(
         later,
         [
             {"event": "tool.completed", "tool": "a", "preview": "first"},
@@ -280,7 +281,7 @@ def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
             {"event": "tool.completed", "tool": "a", "preview": "second"},
         ],
         start=2,
-    ) == [("r:tool:3", "second")]
+    )
     # B started before the backlog: without ids its completion cannot be told from A's.
     earlier: list[Message] = [later[0], AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(1)]), first]
     assert replay(earlier, [{"event": "tool.completed", "tool": "a", "preview": "second"}], start=2) == []

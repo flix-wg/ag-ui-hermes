@@ -21,7 +21,7 @@ First release.
 - `unknown_events` (`"drop"`, `"custom"` or `"raw"`) for Hermes events nothing maps.
 - `SupportsSessionMessages` and `SupportsCapabilities` protocols for the optional `RunsClient` methods.
 - Thread store protocol with an atomic `compare_and_set`, and a bounded `InMemoryThreadStore`.
-- FastAPI endpoint (`ag-ui-hermes[fastapi]`): run, connect, stop and capabilities routes. Malformed bodies answer HTTP 400 `invalid_input`, and every `invalid_input` carries a fixed `reason`.
+- FastAPI endpoint (`ag-ui-hermes[fastapi]`): run, connect, stop and capabilities routes, with request bodies in the OpenAPI schema. Malformed bodies answer HTTP 400 `invalid_input`, and every `invalid_input` carries a fixed `reason`.
 - `HermesTranslator` is public but provisional.
 - npm package `ag-ui-hermes`: `HermesAgent` (an `HttpAgent`) with `connect()`, server-side `abortRun()`, async `getHeaders` and `getCapabilities()`.
 - Example: FastAPI server and assistant-ui chat, runnable against a fake Hermes.
@@ -37,6 +37,8 @@ First release.
 - A resume that answers an interrupt the thread neither waits on nor has answered is refused with `invalid_input`.
 - `tool_filter` also applies to the session history `connect` restores; restored tool arguments are always `"{}"`.
 - Restored history carries no stored tool results, which are whole and unredacted unlike live previews, unless `InputPolicy(restore_tool_results=True)`.
-- After a truncated replay, a tool completion whose start was evicted attaches to a held call by tool-call id only and is dropped without one.
+- After a truncated replay, a tool completion attaches to its call by tool-call id only and is dropped without one, as its start may have been evicted.
+- Restored history keys a reused tool-call id to the latest call, so a hidden call's stored result never passes as the earlier visible call's.
+- The endpoint refuses POST bodies without an `application/json` (or `+json`) content type (`malformed_body`), so cross-origin requests always need a CORS preflight.
 - `InMemoryThreadStore` never evicts a thread with a live run; at the cap it grows and logs a warning.
 - The adapter never logs request bodies, headers or tokens. Exceptions from stores and hooks are logged with their traceback, verbatim; the host owns its logging.

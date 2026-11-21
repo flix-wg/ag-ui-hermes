@@ -170,6 +170,10 @@ async def history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: ToolV
     out: list[Message] = []
     for row in rows:
         mid, role, content = f"hermes:msg:{row.get('id')}", row.get("role"), row.get("content")
+        if role == "assistant":  # a call that reuses an id replaces the earlier call's visibility
+            for c in row.get("tool_calls") or ():
+                if isinstance(c, dict):
+                    visible.pop(str(c.get("id")), None)
         if row.get("display_kind") == "hidden":
             continue
         parts = _stored_parts(content) if isinstance(content, list) else []

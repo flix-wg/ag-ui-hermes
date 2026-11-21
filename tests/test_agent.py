@@ -360,7 +360,8 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     fake = FakeHermes([{"event": "run.completed", "output": "4", "completed": True}])
     agent = make_agent(fake)
     # Live, this filter also hides calls by their preview, which stored rows lack.
-    agent.tool_filter = lambda ctx, tool, preview, event: None if tool == "vault" or "secret" in preview else (tool, preview)
+    hide = lambda ctx, tool, preview, event: None if tool == "vault" or "secret" in preview else (tool, preview)  # noqa: E731
+    agent.tool_filter = hide
     await collect(agent.run(agent_input()))
 
     def call(cid: str, name: str) -> dict[str, Any]:
@@ -375,6 +376,8 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
         {"id": 6, "role": "tool", "content": "orphan", "tool_call_id": "c9"},
         {"id": 7, "role": "assistant", "content": "4"},
         {"id": 8, "role": "user", "content": "", "display_kind": "hidden"},
+        {"id": 9, "role": "assistant", "content": None, "tool_calls": [call("c1", "vault")]},  # reuses c1
+        {"id": 10, "role": "tool", "content": "hunter3", "tool_call_id": "c1"},
     ]
     events = await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r2", messages=[])))
     assert [e.type.value for e in events] == ["RUN_STARTED", "MESSAGES_SNAPSHOT", "RUN_FINISHED"]
@@ -390,11 +393,15 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     agent.tool_filter = None
     unfiltered = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r4", messages=[]))))[1]
     assert isinstance(unfiltered, MessagesSnapshotEvent)
-    assert [m.role for m in unfiltered.messages] == ["user", "assistant", "assistant", "assistant"]
+    assert [m.role for m in unfiltered.messages] == ["user", "assistant", "assistant", "assistant", "assistant"]
     agent.inputs = InputPolicy(restore_tool_results=True)
     restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r5", messages=[]))))[1]
     assert isinstance(restored, MessagesSnapshotEvent)
-    assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3", "hermes:msg:4"]
+    assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3", "hermes:msg:4", "hermes:msg:10"]
+    agent.tool_filter = hide  # the hidden call that reused c1 keeps its result hidden
+    restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r6", messages=[]))))[1]
+    assert isinstance(restored, MessagesSnapshotEvent)
+    assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3"]
 
 
 async def test_dropped_stream_resumes_from_last_event_id() -> None:
@@ -581,8 +588,15 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
         invalid = await client.post("/agent", json=no_text, headers=owner)
         assert invalid.status_code == 400
         assert invalid.json()["error"] == {"code": "invalid_input", "message": "The request has no user message to send.", "reason": "no_user_message"}
-        for malformed in (json.dumps({"threadId": "t1"}), "{not json"):
-            bad = await client.post("/agent/connect", content=malformed, headers=owner)
+        as_json, as_text = {**owner, "content-type": "application/json"}, {**owner, "content-type": "text/plain"}
+        # text/plain would let a cross-origin page skip the CORS preflight.
+        stop_body = json.dumps({"threadId": "t1", "runId": "r1"})
+        for route, malformed, headers in [
+            ("/connect", json.dumps({"threadId": "t1"}), as_json),
+            ("/connect", "{not json", as_json),
+            ("/stop", stop_body, as_text),
+        ]:
+            bad = await client.post(f"/agent{route}", content=malformed, headers=headers)
             assert (bad.status_code, bad.json()["error"]["reason"]) == (400, "malformed_body")
         assert not any(path.endswith("/stop") for _, path, _ in fake.calls)  # validated before stopping run_1
         rejoin = asyncio.create_task(client.post("/agent/connect", json=agent_input("r3").model_dump(mode="json", by_alias=True), headers=owner))

@@ -80,9 +80,9 @@ ids. `run.completed` then sends a `MESSAGES_SNAPSHOT` that puts the canonical `o
 the stale text and corrects held messages whose text changed, keeping held tool calls and results
 the replay did not rebuild. A tool completion whose start was evicted attaches only by id: in a run
 that carries tool-call ids (see [events](events.md)), to the one unfinished call the client holds
-with that id that started before the backlog. Without an id it is dropped, never put on a call it
-may not belong to: the visible call of the same tool might have finished in the evicted part, and
-the completion belong to a later hidden call. An approval after truncation is never
+with that id that started before the backlog. After a truncation, a completion without an id is dropped, even when a call of the same tool
+started in the backlog, never put on a call it may not belong to: that visible call might have
+finished in the evicted part, or an evicted hidden call own the completion. An approval after truncation is never
 bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the

@@ -40,8 +40,8 @@ same ids:
 
 Once a run's tool events have carried a `tool_call_id` (or `id`), a `tool.completed` pairs with
 its start by that id only; one without an id gets a call of its own. In a run without ids it takes
-the earliest open call of the same tool name. A completion whose start a truncated backlog lost
-is matched by id only, and dropped without one (see [connect](connect.md)).
+the earliest open call of the same tool name. Once the backlog was truncated, a completion is
+matched by id only and dropped without one, since a lost start could own it (see [connect](connect.md)).
 
 With a `state_provider`, a final `STATE_DELTA` or `STATE_SNAPSHOT` precedes `RUN_FINISHED` and
 `RUN_ERROR` from a Hermes run end. Errors raised by the adapter itself get none.
