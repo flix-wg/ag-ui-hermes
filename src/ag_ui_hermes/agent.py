@@ -554,7 +554,7 @@ class HermesAgent:
                         opened = True
                         for opening in await self._open_events(ctx, t, state, replay=silent_until < 0):
                             yield opening
-                    items = await self._fed(input.thread_id, t, event)
+                    items = await self._ending(ctx, t, await self._fed(input.thread_id, t, event), state)
                     for item in items:
                         yield item
                     if t.suspended:
@@ -596,7 +596,7 @@ class HermesAgent:
                     yield item
                 if t.suspended:
                     return
-            for item in t.finish(status):
+            for item in await self._ending(ctx, t, t.finish(status), state):
                 yield item
             if not t.done:
                 if deadline is not None and loop.time() >= deadline:
@@ -679,6 +679,13 @@ class HermesAgent:
     ) -> list[BaseEvent]:
         input = _input(ctx)
         return t.start(input.thread_id, input.run_id, input.messages, replay=replay) + await self._state(ctx, sent)
+
+    async def _ending(self, ctx: HookContext, t: HermesTranslator, items: list[BaseEvent], sent: list[Any]) -> list[BaseEvent]:
+        """``items`` with a last state refresh before the run's terminal event, if it has one."""
+        end = next((i for i, e in enumerate(items) if isinstance(e, (RunFinishedEvent, RunErrorEvent))), None)
+        if not t.done or end is None:
+            return items
+        return items[:end] + await self._state(ctx, sent) + items[end:]
 
     async def _state(self, ctx: HookContext, sent: list[Any]) -> list[BaseEvent]:
         """``STATE_SNAPSHOT`` first in a stream, then ``STATE_DELTA`` against what ``sent`` holds."""

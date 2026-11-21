@@ -256,14 +256,15 @@ def apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
 
 async def test_state_refreshes_are_sent_as_deltas_that_rebuild_the_state() -> None:
     tool: list[Step] = [{"event": "tool.started", "tool": "ha", "preview": ""}, {"event": "tool.completed", "tool": "ha"}]
-    fake = FakeHermes([*tool, *tool, *tool, {"event": "run.completed", "output": "", "completed": True}])
+    fake = FakeHermes([*tool, *tool, {"event": "run.completed", "output": "", "completed": True}],
+                      [{"event": "run.failed", "error": "quota"}])
     states: list[Any] = [
         {"lights": {"kitchen": "on"}, "rooms": ["a", "b"], "a/b~c": 1},
         {"lights": {"kitchen": "off", "hall": None}, "rooms": ["a", "b", "c"], "a/b~c": 1},
         {"lights": {"kitchen": "off", "hall": None}, "rooms": ["a", "b", "c"], "a/b~c": 1},
-        {"lights": {"hall": {"level": 3}}, "rooms": ["c"], "a/b~c": True},
+        {"lights": {"hall": {"level": 3}}, "rooms": ["c"], "a/b~c": True},  # the refresh at the run's end
     ]
-    served = iter(states)
+    served = iter([*states, {"error": None}, {"error": "quota_exceeded"}])
 
     async def provider(ctx: HookContext) -> Any:
         return next(served)
@@ -279,6 +280,10 @@ async def test_state_refreshes_are_sent_as_deltas_that_rebuild_the_state() -> No
         state = apply_patch(state, [op.model_dump(mode="json") for op in delta.delta])
     assert state == states[-1]
     assert type(state["a/b~c"]) is bool
+    assert isinstance(events[-2], StateDeltaEvent)  # the final state lands before RUN_FINISHED
+
+    failed = await collect(agent.run(agent_input("r2")))  # the host's error detail travels in state
+    assert [e.type.value for e in failed[-2:]] == ["STATE_DELTA", "RUN_ERROR"]
 
 
 async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates() -> None:
