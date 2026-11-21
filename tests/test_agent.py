@@ -20,11 +20,20 @@ from ag_ui.core import (
 )
 from fastapi import FastAPI
 
-from ag_ui_hermes import HermesAgent, HermesRunsClient, InMemoryThreadStore, ThreadRecord, approval_choice
+from ag_ui_hermes import (
+    HermesAgent, HermesRunsClient, HermesTranslator, InMemoryThreadStore, ThreadRecord, approval_choice,
+)
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from . import connect_cases
 from .fake_hermes import FakeHermes, Step
+
+
+class SlowStore(InMemoryThreadStore):  # a shared store: reads and writes interleave
+    async def get(self, thread_id: str) -> ThreadRecord | None:
+        record = await super().get(thread_id)
+        await asyncio.sleep(0)
+        return record
 
 
 def make_agent(fake: FakeHermes) -> HermesAgent:
@@ -178,13 +187,63 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
     second.cancel()
 
 
-async def test_concurrent_rejoins_both_own_the_run() -> None:
-    class SlowStore(InMemoryThreadStore):  # a shared store: reads and writes interleave
-        async def get(self, thread_id: str) -> ThreadRecord | None:
-            record = await super().get(thread_id)
-            await asyncio.sleep(0)
-            return record
+async def test_concurrent_starts_keep_both_retry_mappings() -> None:
+    fake = FakeHermes([asyncio.Event()], [asyncio.Event()])
+    agent = make_agent(fake)
+    agent.store = SlowStore()
+    runs = [asyncio.create_task(collect(agent.run(agent_input(r)))) for r in ("r1", "r2")]
+    async with asyncio.timeout(2):
+        while not any(c[1].endswith("/stop") for c in fake.calls):
+            await asyncio.sleep(0.01)
+    record = await agent.store.get("t1")
+    assert record and record.started == {"r1": "run_1", "r2": "run_2"}
+    stopped = next(c[1] for c in fake.calls if c[1].endswith("/stop"))
+    assert stopped != f"/v1/runs/{record.run_id}/stop"  # the run that lost the record was stopped
+    for task in runs:
+        task.cancel()
 
+
+async def test_suspend_never_restores_an_answered_or_older_approval() -> None:
+    agent = make_agent(FakeHermes())
+    t = HermesTranslator("run_1")
+    t.start("t1", "r1")
+    t.feed({"event": "approval.request", "request_id": "A", "seq": 2})
+    for cursor, pending in [(5, ["B"]), (2, [])]:  # B persisted later / A answered by another client
+        await agent.store.put_if_run("t1", ThreadRecord(run_id="run_1", cursor=cursor, pending_interrupts=pending), None)
+        await agent._suspend("t1", t, 2)
+        record = await agent.store.get("t1")
+        assert record and (record.cursor, record.pending_interrupts) == (cursor, pending)
+        agent.store = InMemoryThreadStore()
+
+
+async def test_answered_approval_at_seq_0_does_not_look_like_truncation() -> None:
+    gate = asyncio.Event()
+    fake = FakeHermes([
+        {"event": "approval.request", "request_id": "req-1", "command": "ls"},
+        {"event": "message.delta", "delta": "Hel"},
+        gate,
+        {"event": "message.delta", "delta": "lo"},
+        {"event": "run.completed", "output": "Hello", "completed": True},
+    ])
+    agent = make_agent(fake)
+    await collect(agent.run(agent_input()))
+    resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
+    stream = agent.run(agent_input("r2", resume=resume))
+    message_id = None
+    async for event in stream:
+        if isinstance(event, TextMessageContentEvent):
+            message_id = event.message_id
+            break
+    await stream.aclose()
+    gate.set()
+    assert message_id is not None
+    held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id=message_id, content="Hel")]
+    rejoined = await collect(agent.connect(agent_input("r3", held)))
+    assert isinstance(rejoined[1], MessagesSnapshotEvent) and [m.id for m in rejoined[1].messages] == ["u1"]
+    assert text(rejoined) == "Hello"
+
+
+async def test_concurrent_rejoins_both_own_the_run() -> None:
     fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, asyncio.Event()])
     agent = make_agent(fake)
     agent.store = SlowStore()

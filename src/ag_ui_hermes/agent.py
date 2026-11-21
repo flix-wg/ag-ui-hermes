@@ -120,19 +120,26 @@ class HermesAgent:
             extra=self.run_body(input) if self.run_body else None,
         )
         run_id = started.run_id
-        latest = list({**record.started, input.run_id: run_id}.items())[-_STARTED_HISTORY:]
-        await self.store.put(
-            input.thread_id,
-            ThreadRecord(
-                session_id=record.session_id, run_id=run_id, agui_run_ids=[input.run_id],
-                started=dict(latest),
-            ),
-        )
+        record = await self._claim(input, run_id, stopped=record.run_id)
         if record.session_id is None:
             session_id = (await self.client.get_run(run_id)).get("session_id") or None
             await self._update(input.thread_id, run_id, lambda r: setattr(r, "session_id", session_id))
         async for event in self._stream(input, self.translator(run_id)):
             yield event
+
+    async def _claim(self, input: RunAgentInput, run_id: str, *, stopped: str | None) -> ThreadRecord:
+        """Make ``run_id`` the thread's run, keeping retry mappings a concurrent start wrote."""
+        while True:
+            record = await self.store.get(input.thread_id) or ThreadRecord()
+            previous = record.run_id
+            latest = list({**record.started, input.run_id: run_id}.items())[-_STARTED_HISTORY:]
+            record.run_id, record.cursor, record.started = run_id, -1, dict(latest)
+            record.agui_run_ids, record.pending_interrupts = [input.run_id], []
+            if await self.store.put_if_run(input.thread_id, record, previous):
+                break
+        if previous and previous not in (run_id, stopped):  # a concurrent start claimed the thread first
+            await self._stop_quietly(previous)
+        return record
 
     async def _resume(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
         record = await self.store.get(input.thread_id)
@@ -195,6 +202,7 @@ class HermesAgent:
                     if event.get("event") == "approval.request" and (
                         silent or not await self._approval_pending(run_id, event)
                     ):
+                        t.skip(event)
                         continue
                     if silent:
                         t.feed(event)
@@ -263,7 +271,13 @@ class HermesAgent:
 
     async def _suspend(self, thread_id: str, t: HermesTranslator, cursor: int) -> None:
         def suspend(record: ThreadRecord) -> None:
-            record.cursor, record.pending_interrupts = cursor, list(t.pending_interrupts)
+            # Another client may have answered these or persisted a newer approval meanwhile.
+            if cursor < record.cursor:
+                return
+            pending = list(t.pending_interrupts)
+            if cursor == record.cursor:
+                pending = [i for i in pending if i in record.pending_interrupts]
+            record.cursor, record.pending_interrupts = cursor, pending
 
         await self._update(thread_id, t.hermes_run_id, suspend)
 

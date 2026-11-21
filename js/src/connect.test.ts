@@ -27,7 +27,18 @@ const threadMessages = (messages: Message[]) =>
   }));
 
 async function rejoin({ held, events }: Case) {
-  const agent = new HermesAgent({ url: "https://app.test/agent", threadId: "t1", fetch: async () => sse(events) });
+  // Serve the recorded stream only to a connect request that carries what the client holds.
+  const fetch = async (url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    expect(url).toBe("https://app.test/agent/connect");
+    expect(body.threadId).toBe("t1");
+    expect(body.runId).toEqual(expect.any(String));
+    expect(body.messages.map((m: Message) => [m.id, m.role, m.content || undefined])).toEqual(
+      held.map((m) => [m.id, m.role, m.content || undefined]),
+    );
+    return sse(events);
+  };
+  const agent = new HermesAgent({ url: "https://app.test/agent", threadId: "t1", fetch });
   const errors: unknown[] = [];
   const controller = new AgUiThreadController({
     agent,
