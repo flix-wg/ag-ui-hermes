@@ -2,6 +2,7 @@ import {
   HttpAgent,
   runHttpRequest,
   transformHttpEventStream,
+  type AgentCapabilities,
   type BaseEvent,
   type HttpAgentConfig,
   type RunAgentInput,
@@ -13,9 +14,11 @@ export interface HermesAgentConfig extends HttpAgentConfig {
   connectUrl?: string;
   /** Stop endpoint. Defaults to `${url}/stop`. */
   stopUrl?: string;
-  /** Headers resolved for every request, e.g. a rotating CSRF token. */
-  getHeaders?: () => Record<string, string>;
+  /** Headers resolved before every request (run, connect, stop, capabilities), e.g. a rotating CSRF token. May be async. */
+  getHeaders?: () => Record<string, string> | Promise<Record<string, string>>;
 }
+
+export type { AgentCapabilities };
 
 /**
  * HttpAgent for an ag-ui-hermes endpoint. It implements `connect()`, so
@@ -27,7 +30,9 @@ export interface HermesAgentConfig extends HttpAgentConfig {
 export class HermesAgent extends HttpAgent {
   connectUrl: string;
   stopUrl: string;
-  getHeaders?: () => Record<string, string>;
+  getHeaders?: HermesAgentConfig["getHeaders"];
+  private baseUrl: string;
+  private rawFetch: HttpAgent["fetch"];
   private lastRunId?: string;
 
   constructor(config: HermesAgentConfig) {
@@ -36,19 +41,30 @@ export class HermesAgent extends HttpAgent {
     this.connectUrl = config.connectUrl ?? `${base}/connect`;
     this.stopUrl = config.stopUrl ?? `${base}/stop`;
     this.getHeaders = config.getHeaders;
+    this.baseUrl = base;
+    this.rawFetch = this.fetch;
+    this.fetch = this.withDynamicHeaders;
   }
 
-  private requestHeaders(): Record<string, string> {
-    return { ...this.headers, ...this.getHeaders?.() };
+  // HttpAgent builds request options synchronously, so dynamic headers are merged at the fetch layer.
+  private withDynamicHeaders: HttpAgent["fetch"] = async (url, init) => {
+    const dynamic = await this.getHeaders?.();
+    return this.rawFetch(url, dynamic ? { ...init, headers: { ...(init.headers as Record<string, string>), ...dynamic } } : init);
+  };
+
+  /** Fetches `GET <url>/capabilities`. */
+  async getCapabilities(): Promise<AgentCapabilities> {
+    const res = await this.fetch(`${this.baseUrl}/capabilities`, {
+      method: "GET",
+      headers: { ...this.headers, Accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`capabilities request failed: HTTP ${res.status}`);
+    return (await res.json()) as AgentCapabilities;
   }
 
   protected override requestInit(input: RunAgentInput): RequestInit {
     this.lastRunId = input.runId;
-    const init = super.requestInit(input);
-    return {
-      ...init,
-      headers: { ...(init.headers as Record<string, string>), ...this.getHeaders?.() },
-    };
+    return super.requestInit(input);
   }
 
   protected override connect(input: RunAgentInput): Observable<BaseEvent> {
@@ -65,7 +81,7 @@ export class HermesAgent extends HttpAgent {
     if (this.lastRunId !== undefined) {
       void this.fetch(this.stopUrl, {
         method: "POST",
-        headers: { ...this.requestHeaders(), "Content-Type": "application/json" },
+        headers: { ...this.headers, "Content-Type": "application/json" },
         body: JSON.stringify({ threadId: this.threadId, runId: this.lastRunId }),
         keepalive: true,
       }).catch(() => undefined);
@@ -78,6 +94,9 @@ export class HermesAgent extends HttpAgent {
     cloned.connectUrl = this.connectUrl;
     cloned.stopUrl = this.stopUrl;
     cloned.getHeaders = this.getHeaders;
+    cloned.baseUrl = this.baseUrl;
+    cloned.rawFetch = this.rawFetch;
+    cloned.fetch = cloned.withDynamicHeaders;
     return cloned;
   }
 }
