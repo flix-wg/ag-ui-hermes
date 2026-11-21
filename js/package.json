@@ -70,7 +70,7 @@
     "url": "https://github.com/flix-wg/ag-ui-hermes/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "module": "./dist/index.js"
 }
