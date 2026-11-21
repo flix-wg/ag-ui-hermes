@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@ag-ui/client";
 import { fromAgUiMessages } from "@assistant-ui/react-ag-ui";
-// @ts-expect-error internal module: the controller behind useAgUiRuntime, driven without React
+// internal module: the controller behind useAgUiRuntime, driven without React
 import { AgUiThreadController } from "../node_modules/@assistant-ui/react-ag-ui/dist/runtime/AgUiThreadController.js";
 import { HermesAgent } from "./index.js";
 import cases from "./connect-cases.json";
@@ -33,16 +33,16 @@ async function rejoin({ held, events }: Case) {
     expect(url).toBe("https://app.test/agent/connect");
     expect(body.threadId).toBe("t1");
     expect(body.runId).toEqual(expect.any(String));
-    expect(body.messages.map((m: Message) => [m.id, m.role, m.content || undefined])).toEqual(
-      held.map((m) => [m.id, m.role, m.content || undefined]),
-    );
+    // Full shape: truncated replay depends on toolCalls and toolCallId of what the client holds.
+    const norm = (ms: Message[]) => ms.map((m) => ({ ...m, content: m.content || undefined }));
+    expect(norm(body.messages)).toEqual(norm(held));
     return sse(events);
   };
   const agent = new HermesAgent({ url: "https://app.test/agent", threadId: "t1", fetch });
   const errors: unknown[] = [];
   const controller = new AgUiThreadController({
     agent,
-    logger: { error: (...args: unknown[]) => errors.push(args) },
+    logger: { debug: () => {}, error: (...args: unknown[]) => errors.push(args) },
     showThinking: true,
     onError: (error: unknown) => errors.push(error),
   });
