@@ -129,7 +129,6 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     resume = [
         ResumeEntry(interrupt_id="req-1", status="resolved", payload={"approved": True}),
         ResumeEntry(interrupt_id="req-1", status="resolved", payload="once"),
-        ResumeEntry(interrupt_id="req-stale", status="resolved", payload={"approved": True}),
     ]
     second = await collect(agent.run(agent_input("r3", resume=resume)))
     approvals = [c for c in fake.calls if c[1].endswith("/approval")]
@@ -144,23 +143,28 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     assert second[-1].outcome.type == "success"
 
 
-async def test_resume_that_leaves_an_approval_open_interrupts_again() -> None:
-    fake = FakeHermes([
-        {"event": "approval.request", "request_id": "req-1", "command": "ls"},
-        {"event": "run.completed", "output": "done", "completed": True},
-    ])
+def approvals(*ids: str) -> list[Step]:
+    steps: list[Step] = [{"event": "approval.request", "request_id": i, "command": f"cmd {i}"} for i in ids]
+    return [*steps, {"event": "run.completed", "output": "done", "completed": True}]
+
+
+async def at_second_approval(agent: HermesAgent) -> None:
+    assert interrupts(await collect(agent.run(agent_input()))) == ["Z"]
+    assert interrupts(await collect(agent.run(answer("r1b", "Z")))) == ["A"]
+
+
+async def test_a_late_repeat_of_an_answer_interrupts_again_and_unknown_answers_are_refused() -> None:
+    fake = FakeHermes(approvals("Z", "A"))
     agent = make_agent(fake)
-    await collect(agent.run(agent_input()))
-    stale = [ResumeEntry(interrupt_id="req-old", status="resolved", payload="once")]
-    again = await asyncio.wait_for(collect(agent.run(agent_input("r2", resume=stale))), 2)
-    finished = again[-1]
-    assert isinstance(finished, RunFinishedEvent)
-    assert finished.outcome
-    assert finished.outcome.type == "interrupt"
-    assert [i.id for i in finished.outcome.interrupts] == ["req-1"]
-    assert not any(path.endswith("/approval") for _, path, _ in fake.calls)
-    resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
-    assert text(await collect(agent.run(agent_input("r3", resume=resume)))) == "done"
+    with pytest.raises(AgentInputError):  # no run on the thread yet
+        await agent.open_run(answer("r0", "Z"))
+    await at_second_approval(agent)
+    with pytest.raises(AgentInputError):
+        await agent.open_run(answer("r2", "req-old"))
+    # Z was answered already (say by another client): A stays open and interrupts again.
+    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r3", "Z"))), 2)) == ["A"]
+    assert text(await collect(agent.run(answer("r4", "A")))) == "done"
+    assert [b["request_id"] for _, path, b in fake.calls if path.endswith("/approval")] == ["Z", "A"]
 
 
 async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
@@ -725,43 +729,36 @@ async def test_rejoin_withdraws_an_approval_another_client_answered() -> None:
     assert [i.id for i in last.outcome.interrupts] == ["B"]
 
 
-APPROVAL_A: list[Step] = [
-    {"event": "approval.request", "request_id": "A", "command": "ls"},
-    {"event": "approval.request", "request_id": "B", "command": "rm"},
-    {"event": "run.completed", "output": "done", "completed": True},
-]
-
-
 async def test_a_resume_reasks_only_the_approval_hermes_still_waits_on() -> None:
-    fake = FakeHermes(APPROVAL_A)
+    fake = FakeHermes(approvals("Z", "A", "B"))
     agent = make_agent(fake)
-    await collect(agent.run(agent_input()))
+    await at_second_approval(agent)
     await agent.client.respond_approval("run_1", request_id="A", choice="once")  # answered outside the adapter
     await until(lambda: fake.runs["run_1"].status.get("approval", {}).get("request_id") == "B")
-    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "old"))), 2)) == ["B"]
+    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == ["B"]
 
 
 async def test_a_stale_resume_does_not_interrupt_a_run_another_resume_finished() -> None:
-    fake = FakeHermes(APPROVAL_A[::2])
+    fake = FakeHermes(approvals("Z", "A"))
     client = RacingClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport()))
     agent = HermesAgent(client, poll_interval=0.01)
-    await collect(agent.run(agent_input()))
+    await at_second_approval(agent)
 
     async def other_client_answers_a() -> None:  # after the stale resume saw A still pending
         assert text(await collect(agent.run(answer("r3", "A")))) == "done"
 
     client.hook = other_client_answers_a
-    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "old"))), 2)) == []
+    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == []
 
 
 async def test_a_resume_reasks_an_approval_the_backlog_lost() -> None:
-    fake = FakeHermes(APPROVAL_A[::2])
+    fake = FakeHermes(approvals("Z", "A"))
     agent = make_agent(fake)
-    await collect(agent.run(agent_input()))
+    await at_second_approval(agent)
     run = fake.runs["run_1"]
     await run.emit({"event": "hermes.keepalive"})
-    run.evicted = 1  # the approval at seq 0 fell out of the replay backlog
-    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "old"))), 2)) == ["A"]
+    run.evicted = len(run.backlog) - 1  # the approval fell out of the replay backlog
+    assert interrupts(await asyncio.wait_for(collect(agent.run(answer("r2", "Z"))), 2)) == ["A"]
 
 
 async def test_js_connect_probe_fixture_is_current() -> None:

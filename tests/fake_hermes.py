@@ -145,7 +145,8 @@ class FakeHermes:
             assert run.task is not None
             run.task.cancel()
             return httpx.Response(200, json={"run_id": run.run_id, "status": "stopping"})
-        if run.status["status"] != "waiting_for_approval":
+        pending = run.status.get("approval", {}).get("request_id")
+        if run.status["status"] != "waiting_for_approval" or body.get("request_id") not in (None, pending):
             return self._error(409, "approval_not_pending")
         run.status["status"] = "running"
         run.status.pop("approval", None)

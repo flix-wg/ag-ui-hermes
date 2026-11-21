@@ -299,6 +299,9 @@ class HermesAgent:
             record = await self.store.get(input.thread_id)
             if record is None or record.run_id is None:
                 raise AgentInputError("No interrupted Hermes run for this thread")
+            # An id another client already answered is a late repeat, not an error.
+            if not set(answers) <= {*record.pending_interrupts, *record.answered_interrupts}:
+                raise AgentInputError("The resume answers an interrupt this thread is not waiting on")
             return self._resume(ctx, answers)
         record = await self.store.get(input.thread_id) or ThreadRecord()
         earlier = record.started.get(input.run_id)
