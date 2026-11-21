@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -14,6 +15,8 @@ from ag_ui.core import (
     RunAgentInput,
     RunErrorEvent,
     RunFinishedEvent,
+    StateDeltaEvent,
+    StateSnapshotEvent,
     TextMessageContentEvent,
     TextMessageStartEvent,
     ToolCallResultEvent,
@@ -148,6 +151,50 @@ async def test_resume_that_leaves_an_approval_open_interrupts_again() -> None:
     assert not any(path.endswith("/approval") for _, path, _ in fake.calls)
     resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
     assert text(await collect(agent.run(agent_input("r3", resume=resume)))) == "done"
+
+
+def apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
+    doc = copy.deepcopy(doc)
+    for op in ops:
+        *parents, last = [p.replace("~1", "/").replace("~0", "~") for p in op["path"].split("/")[1:]]
+        target = doc
+        for p in parents:
+            target = target[int(p)] if isinstance(target, list) else target[p]
+        key: Any = int(last) if isinstance(target, list) else last
+        if op["op"] == "remove":
+            del target[key]
+        elif op["op"] == "add" and isinstance(target, list):
+            target.insert(key, op["value"])
+        else:
+            target[key] = op["value"]
+    return doc
+
+
+async def test_state_refreshes_are_sent_as_deltas_that_rebuild_the_state() -> None:
+    tool: list[Step] = [{"event": "tool.started", "tool": "ha", "preview": ""}, {"event": "tool.completed", "tool": "ha"}]
+    fake = FakeHermes([*tool, *tool, *tool, {"event": "run.completed", "output": "", "completed": True}])
+    states: list[Any] = [
+        {"lights": {"kitchen": "on"}, "rooms": ["a", "b"], "a/b~c": 1},
+        {"lights": {"kitchen": "off", "hall": None}, "rooms": ["a", "b", "c"], "a/b~c": 1},
+        {"lights": {"kitchen": "off", "hall": None}, "rooms": ["a", "b", "c"], "a/b~c": 1},
+        {"lights": {"hall": {"level": 3}}, "rooms": ["c"], "a/b~c": True},
+    ]
+    served = iter(states)
+
+    async def provider(ctx: HookContext) -> Any:
+        return next(served)
+
+    agent = make_agent(fake)
+    agent.state_provider, agent.state_refresh_tools = provider, frozenset({"ha"})
+    events = await collect(agent.run(agent_input()))
+    snapshot = next(e for e in events if isinstance(e, StateSnapshotEvent))
+    deltas = [e for e in events if isinstance(e, StateDeltaEvent)]
+    assert len(deltas) == 2  # an unchanged state sends nothing
+    state = snapshot.snapshot
+    for delta in deltas:
+        state = apply_patch(state, [op.model_dump(mode="json") for op in delta.delta])
+    assert state == states[-1]
+    assert type(state["a/b~c"]) is bool
 
 
 async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates() -> None:

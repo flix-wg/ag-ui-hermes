@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
@@ -20,10 +21,12 @@ from ag_ui.core import (
     RunFinishedEvent,
     RunFinishedSuccessOutcome,
     RunStartedEvent,
+    StateDeltaEvent,
     StateSnapshotEvent,
     SubagentFinishedEvent,
 )
 
+from ._patch import json_diff
 from .client import HermesAPIError, HermesError, RunsClient, RunStreamGoneError
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
 from .translator import TERMINAL_STATUSES, HermesTranslator, run_started
@@ -363,6 +366,7 @@ class HermesAgent:
         run_id = t.hermes_run_id
         opened = False
         held: list[Mapping[str, Any]] = []
+        state: list[Any] = []  # the last state sent in this stream
         try:
             async with aclosing(self.client.events(run_id)) as stream:
                 async for event in stream:
@@ -384,7 +388,7 @@ class HermesAgent:
                         continue
                     if not opened:
                         opened = True
-                        for opening in await self._open_events(ctx, t, replay=silent_until < 0):
+                        for opening in await self._open_events(ctx, t, state, replay=silent_until < 0):
                             yield opening
                     items = await self._fed(input.thread_id, t, event)
                     for item in items:
@@ -392,14 +396,14 @@ class HermesAgent:
                     if t.suspended:
                         return
                     if t.completed_tool in self.state_refresh_tools:
-                        for state in await self._state(ctx):
-                            yield state
+                        for item in await self._state(ctx, state):
+                            yield item
                     if t.done:
                         break
         except RunStreamGoneError as exc:
             logger.info("Event stream of Hermes run %s is gone (%s); polling its status", run_id, exc)
         if not opened:
-            for opening in await self._open_events(ctx, t, replay=silent_until < 0):
+            for opening in await self._open_events(ctx, t, state, replay=silent_until < 0):
                 yield opening
         if held:
             for item in await self._interrupted(input.thread_id, t, t.reinterrupt(held), silent_until):
@@ -491,15 +495,25 @@ class HermesAgent:
 
         await self._update(thread_id, run_id, release)
 
-    async def _open_events(self, ctx: HookContext, t: HermesTranslator, *, replay: bool) -> list[BaseEvent]:
+    async def _open_events(
+        self, ctx: HookContext, t: HermesTranslator, sent: list[Any], *, replay: bool
+    ) -> list[BaseEvent]:
         input = _input(ctx)
-        return t.start(input.thread_id, input.run_id, input.messages, replay=replay) + await self._state(ctx)
+        return t.start(input.thread_id, input.run_id, input.messages, replay=replay) + await self._state(ctx, sent)
 
-    async def _state(self, ctx: HookContext) -> list[BaseEvent]:
+    async def _state(self, ctx: HookContext, sent: list[Any]) -> list[BaseEvent]:
+        """``STATE_SNAPSHOT`` first in a stream, then ``STATE_DELTA`` against what ``sent`` holds."""
         if self.state_provider is None:
             return []
-        state = await self.state_provider(ctx)
-        return [] if state is None else [StateSnapshotEvent(snapshot=state)]
+        state = copy.deepcopy(await self.state_provider(ctx))
+        if state is None:
+            return []
+        if sent and isinstance(sent[0], dict) and isinstance(state, dict):
+            ops = json_diff(sent[0], state)
+            sent[0] = state
+            return [StateDeltaEvent.model_validate({"delta": ops})] if ops else []
+        sent[:] = [state]
+        return [StateSnapshotEvent(snapshot=state)]
 
     async def _approval_pending(self, run_id: str, event: Mapping[str, Any]) -> bool:
         """Replayed approvals may already be answered; only the run status knows."""

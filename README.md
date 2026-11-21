@@ -118,8 +118,8 @@ HermesAgent(
     authorize=check_access,                                  # async ctx -> bool, see Authorization
     tool_filter=lambda ctx, tool, preview, event: None if tool == "secrets" else (tool, preview),
     custom_event_mapper=lambda ctx, event: None,             # host-specific events -> AG-UI events
-    state_provider=load_state,                               # async ctx -> state for STATE_SNAPSHOT
-    state_refresh_tools={"ha_call_service"},                 # snapshot again after these tools complete
+    state_provider=load_state,                               # async ctx -> state, see below
+    state_refresh_tools={"ha_call_service"},                 # read state again after these tools complete
     run_body=lambda ctx: {"instructions": "..."},            # extra /v1/runs body fields
     on_error=lambda ctx, exc: sentry_sdk.capture_exception(exc),
     allowed_choices={"once", "session", "deny"},             # approval choices clients may send
@@ -127,6 +127,11 @@ HermesAgent(
     poll_timeout=1800,                                       # give up polling a run whose stream is gone
 )
 ```
+
+Each stream (run, resume or connect) opens with a `STATE_SNAPSHOT` from `state_provider`. A
+refresh after a tool in `state_refresh_tools` sends a `STATE_DELTA` (RFC 6902 JSON Patch against
+the last state sent in that stream) when both states are JSON objects, nothing when the state did
+not change, and a new snapshot otherwise.
 
 ## Authorization
 
