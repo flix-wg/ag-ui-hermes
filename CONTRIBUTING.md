@@ -22,4 +22,6 @@ uv run pytest
 cd js && npm run build && npm test && npm run typecheck --if-present
 ```
 
-Add a line to `CHANGELOG.md` under Unreleased for user-visible changes. Keep tests few and meaningful.
+To try a change in a browser, run the example against the fake Hermes: `cd examples/fastapi-assistant-ui && make install demo` (see [its README](examples/fastapi-assistant-ui/README.md)).
+
+Add a line to `CHANGELOG.md` under the unreleased version for user-visible changes. Keep tests few and meaningful.

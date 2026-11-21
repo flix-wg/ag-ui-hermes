@@ -66,7 +66,12 @@ const capabilities = await agent.getCapabilities(); // GET <url>/capabilities
 ```
 
 Returns the AG-UI `AgentCapabilities` object served by the endpoint. It rejects on a non-2xx
-response. This requires a server version that serves the route.
+response.
+
+## Example
+
+[`examples/fastapi-assistant-ui`](../examples/fastapi-assistant-ui) is a complete chat with approvals
+and reconnect.
 
 ## License
 
