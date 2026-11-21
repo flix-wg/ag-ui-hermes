@@ -43,8 +43,7 @@ async def test_run_error_hides_the_cause_and_the_log_keeps_it(
 
     errors: list[tuple[HookContext, Exception]] = []
     http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-    agent = HermesAgent(HermesRunsClient(f"http://{SECRET}", TOKEN, http=http),
-                        on_error=lambda ctx, exc: errors.append((ctx, exc)))
+    agent = HermesAgent(HermesRunsClient(f"http://{SECRET}", TOKEN, http=http), on_error=lambda ctx, exc: errors.append((ctx, exc)))
     with caplog.at_level(logging.DEBUG, logger="ag_ui_hermes"):
         events = await collect(agent.run(agent_input(messages=[UserMessage(id="u1", content=PROMPT)])))
 
@@ -77,9 +76,7 @@ class BrokenStore(InMemoryThreadStore):
 
 
 @pytest.mark.parametrize(("refuse", "code"), [(False, "internal_error"), (True, "store_conflict")])
-async def test_store_failures_end_the_stream_with_run_error(
-    refuse: bool, code: str, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_store_failures_end_the_stream_with_run_error(refuse: bool, code: str, caplog: pytest.LogCaptureFixture) -> None:
     fake = FakeHermes([asyncio.Event()])
     agent = make_agent(fake)
     agent.store = BrokenStore(refuse)

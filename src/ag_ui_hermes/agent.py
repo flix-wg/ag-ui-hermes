@@ -257,18 +257,12 @@ class HermesAgent:
             state=StateCapabilities(snapshots=state, deltas=state),
             multi_agent=MultiAgentCapabilities(supported=True, delegation=True),
             reasoning=ReasoningCapabilities(supported=features.get("reasoning_streaming") is not False, streaming=False),
-            multimodal=MultimodalCapabilities(
-                input=MultimodalInputCapabilities(image=True, audio=False, video=False, pdf=False, file=False)
-            ),
-            human_in_the_loop=HumanInTheLoopCapabilities(
-                supported=True, approvals=features.get("approval_events") is not False, interrupts=True
-            ),
+            multimodal=MultimodalCapabilities(input=MultimodalInputCapabilities(image=True, audio=False, video=False, pdf=False, file=False)),
+            human_in_the_loop=HumanInTheLoopCapabilities(supported=True, approvals=features.get("approval_events") is not False, interrupts=True),
             custom={"hermes": {"model": model}} if isinstance(model, str) and model else None,
         )
 
-    async def _open(
-        self, ctx: HookContext, prepare: Callable[[HookContext], Awaitable[AsyncGenerator[BaseEvent, None]]]
-    ) -> AsyncGenerator[BaseEvent, None]:
+    async def _open(self, ctx: HookContext, prepare: Callable[[HookContext], Awaitable[AsyncGenerator[BaseEvent, None]]]) -> AsyncGenerator[BaseEvent, None]:
         try:
             await self._authorize(ctx)
             source = await prepare(ctx)
@@ -479,9 +473,7 @@ class HermesAgent:
             history = await self._history(ctx, record.session_id) if record and record.session_id and not input.messages else []
             if history:
                 yield MessagesSnapshotEvent(messages=history)
-            yield RunFinishedEvent(
-                thread_id=input.thread_id, run_id=input.run_id, outcome=RunFinishedSuccessOutcome()
-            )
+            yield RunFinishedEvent(thread_id=input.thread_id, run_id=input.run_id, outcome=RunFinishedSuccessOutcome())
             return
         await self._attach(input, record.run_id)
         async for event in self._stream(ctx, self._translator(ctx, record.run_id)):
@@ -615,9 +607,7 @@ class HermesAgent:
         cursor = seq if isinstance(seq, int) else t.last_seq
         return await self._interrupted(thread_id, t, t.feed(event), cursor, polled=polled)
 
-    async def _interrupted(
-        self, thread_id: str, t: HermesTranslator, items: list[BaseEvent], cursor: int, *, polled: bool = False
-    ) -> list[BaseEvent]:
+    async def _interrupted(self, thread_id: str, t: HermesTranslator, items: list[BaseEvent], cursor: int, *, polled: bool = False) -> list[BaseEvent]:
         if not t.suspended or await self._suspend(thread_id, t, cursor, polled=polled):
             return items
         logger.info("Dropped a stale approval interrupt of Hermes run %s", t.hermes_run_id)
@@ -625,9 +615,7 @@ class HermesAgent:
         t.suspended = False
         return [i for i in items if not isinstance(i, (RunFinishedEvent, SubagentFinishedEvent))]
 
-    async def _update(
-        self, thread_id: str, run_id: str, change: Callable[[ThreadRecord], bool | None]
-    ) -> bool:
+    async def _update(self, thread_id: str, run_id: str, change: Callable[[ThreadRecord], bool | None]) -> bool:
         """Apply ``change`` to the thread's record while it still owns ``run_id``.
 
         ``change`` returning ``False`` skips the write; the result says whether it was written.
@@ -674,9 +662,7 @@ class HermesAgent:
 
         await self._update(thread_id, run_id, release)
 
-    async def _open_events(
-        self, ctx: HookContext, t: HermesTranslator, sent: list[Any], *, replay: bool
-    ) -> list[BaseEvent]:
+    async def _open_events(self, ctx: HookContext, t: HermesTranslator, sent: list[Any], *, replay: bool) -> list[BaseEvent]:
         input = _input(ctx)
         return t.start(input.thread_id, input.run_id, input.messages, replay=replay) + await self._state(ctx, sent)
 
@@ -823,11 +809,7 @@ def _split_messages(messages: Sequence[Message], images: _ImagePolicy) -> tuple[
     last = max((i for i, m in enumerate(messages) if m.role == "user"), default=-1)
     if last < 0:
         return "", []
-    history = [
-        {"role": m.role, "content": _text_of(m)}
-        for m in messages[:last]
-        if m.role in ("user", "assistant") and _text_of(m)
-    ]
+    history = [{"role": m.role, "content": _text_of(m)} for m in messages[:last] if m.role in ("user", "assistant") and _text_of(m)]
     return _user_content(messages[last], images), history
 
 
@@ -878,9 +860,7 @@ def _base64_size(data: str) -> int:
     return len(data) * 3 // 4 - (len(data) - len(data.rstrip("=")))
 
 
-def _history_messages(
-    rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None
-) -> list[Message]:
+def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None) -> list[Message]:
     """AG-UI messages for stored Hermes session rows (user, assistant with tool calls, tool).
 
     Tool calls and results pass ``tool_filter`` as on the live stream, which never sends

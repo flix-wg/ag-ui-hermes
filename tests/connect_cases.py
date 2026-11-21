@@ -54,8 +54,7 @@ async def _case(seen: list[dict[str, Any]], rest: list[dict[str, Any]], diverge:
     http = httpx.AsyncClient(transport=fake.transport())
     agent = HermesAgent(HermesRunsClient("http://hermes", "secret", http=http))
     user = UserMessage(id="u1", content="Hi")
-    stream = agent.run(RunAgentInput(thread_id="t1", run_id="r1", messages=[user], state={}, tools=[],
-                                     context=[], forwarded_props={}))
+    stream = agent.run(RunAgentInput(thread_id="t1", run_id="r1", messages=[user], state={}, tools=[], context=[], forwarded_props={}))
     async for _ in stream:
         break
     await stream.aclose()
@@ -69,8 +68,7 @@ async def _case(seen: list[dict[str, Any]], rest: list[dict[str, Any]], diverge:
     held: list[Message] = [user, *shown.messages()]
     if diverge:
         held[1] = AssistantMessage.model_validate({**held[1].model_dump(), "content": "Draft"})
-    input = RunAgentInput(thread_id="t1", run_id="r2", messages=held, state={}, tools=[], context=[],
-                          forwarded_props={})
+    input = RunAgentInput(thread_id="t1", run_id="r2", messages=held, state={}, tools=[], context=[], forwarded_props={})
     events = [_dump(e) async for e in agent.connect(input)]
     return {"held": [_dump(m) for m in held], "events": events}
 

@@ -93,8 +93,13 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     script: list[Step] = [
         {"event": "message.delta", "delta": "Running it."},
         {"event": "tool.started", "tool": "terminal", "preview": "rm -rf build"},
-        {"event": "approval.request", "request_id": "req-1", "command": "rm -rf build",
-         "description": "recursive delete", "choices": ["once", "session", "always", "deny"]},
+        {
+            "event": "approval.request",
+            "request_id": "req-1",
+            "command": "rm -rf build",
+            "description": "recursive delete",
+            "choices": ["once", "session", "always", "deny"],
+        },
         {"event": "tool.completed", "tool": "terminal", "duration": 1.0, "error": False, "preview": "ok"},
         {"event": "message.delta", "delta": "Deleted."},
         {"event": "run.completed", "output": "Deleted.", "completed": True},
@@ -122,9 +127,7 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     always = [ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always"})]
     rejected = await collect(agent.run(agent_input("r2", resume=always)))
     assert [e.type.value for e in rejected] == ["RUN_STARTED", "RUN_ERROR"]
-    assert _approval_choice(
-        ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})
-    ) == "deny"
+    assert _approval_choice(ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})) == "deny"
 
     resume = [
         ResumeEntry(interrupt_id="req-1", status="resolved", payload={"approved": True}),
@@ -187,18 +190,21 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
         return [b for m, path, b in fake.calls if (m, path) == ("POST", "/v1/runs")]
 
     body = starts()[-1]
-    assert body["input"] == [{"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
-        {"type": "image_url", "image_url": {"url": "data:image/gif;base64,R0lG"}},
-    ]}]
+    assert body["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                {"type": "image_url", "image_url": {"url": "data:image/gif;base64,R0lG"}},
+            ],
+        }
+    ]
     host, fenced = body["instructions"].split("\n\n", 1)
     assert host == "Host rules."  # client system and developer messages are ignored by default
     data = fenced.split("\n<client_data>\n")[1]
     assert data.endswith("\n</client_data>")
     assert "<" not in data.removesuffix("\n</client_data>")
-    assert json.loads(data.removesuffix("\n</client_data>")) == {
-        "context": [{"description": "Page", "value": escape}], "state": {"a": [True], "b": 1}
-    }
+    assert json.loads(data.removesuffix("\n</client_data>")) == {"context": [{"description": "Page", "value": escape}], "state": {"a": [True], "b": 1}}
     assert body["model"] == "gpt-x"
     assert "provider" not in body
 
@@ -211,8 +217,13 @@ async def test_run_input_maps_images_and_props_and_fences_client_data() -> None:
     remote = UserMessage(id="u3", content=[ImagePart(source=UrlSource(value="http://169.254.169.254/a.png"))])
     large = UserMessage(id="u4", content=[ImagePart(source=DataSource(value="A" * 16, mime_type="image/png"))])
     many = UserMessage(id="u5", content=[ImagePart(source=pixel)] * 3)
-    for bad in (agent_input("r3", [audio]), agent_input("r3", forwarded_props={"model": 4}),
-                agent_input("r3", [remote]), agent_input("r3", [large]), agent_input("r3", [many])):
+    for bad in (
+        agent_input("r3", [audio]),
+        agent_input("r3", forwarded_props={"model": 4}),
+        agent_input("r3", [remote]),
+        agent_input("r3", [large]),
+        agent_input("r3", [many]),
+    ):
         with pytest.raises(AgentInputError):
             await agent.open_run(bad)
     agent.allow_image_urls = True
@@ -256,8 +267,7 @@ def apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
 
 async def test_state_refreshes_are_sent_as_deltas_that_rebuild_the_state() -> None:
     tool: list[Step] = [{"event": "tool.started", "tool": "ha", "preview": ""}, {"event": "tool.completed", "tool": "ha"}]
-    fake = FakeHermes([*tool, *tool, {"event": "run.completed", "output": "", "completed": True}],
-                      [{"event": "run.failed", "error": "quota"}])
+    fake = FakeHermes([*tool, *tool, {"event": "run.completed", "output": "", "completed": True}], [{"event": "run.failed", "error": "quota"}])
     states: list[Any] = [
         {"lights": {"kitchen": "on"}, "rooms": ["a", "b"], "a/b~c": 1},
         {"lights": {"kitchen": "off", "hall": None}, "rooms": ["a", "b", "c"], "a/b~c": 1},
@@ -288,12 +298,14 @@ async def test_state_refreshes_are_sent_as_deltas_that_rebuild_the_state() -> No
 
 async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates() -> None:
     gate = asyncio.Event()
-    fake = FakeHermes([
-        {"event": "message.delta", "delta": "Hello "},
-        gate,
-        {"event": "message.delta", "delta": "again"},
-        {"event": "run.completed", "output": "Hello again", "completed": True},
-    ])
+    fake = FakeHermes(
+        [
+            {"event": "message.delta", "delta": "Hello "},
+            gate,
+            {"event": "message.delta", "delta": "again"},
+            {"event": "run.completed", "output": "Hello again", "completed": True},
+        ]
+    )
     agent = make_agent(fake)
 
     stream = agent.run(agent_input())
@@ -333,8 +345,7 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
         return {"id": cid, "type": "function", "function": {"name": name, "arguments": '{"x": 2}'}}
 
     fake.sessions["run_1"] = [
-        {"id": 1, "role": "user", "content": [{"type": "text", "text": "Sum?"},
-                                              {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+        {"id": 1, "role": "user", "content": [{"type": "text", "text": "Sum?"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
         {"id": 2, "role": "assistant", "content": None, "tool_calls": [call("c1", "calc"), call("c2", "vault")]},
         {"id": 3, "role": "tool", "content": "4", "tool_call_id": "c1"},
         {"id": 4, "role": "tool", "content": "hunter2", "tool_call_id": "c2"},
@@ -349,7 +360,10 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     assert isinstance(snapshot, MessagesSnapshotEvent)
     dumped = [m.model_dump(mode="json", by_alias=True, exclude_none=True) for m in snapshot.messages]
     assert [(m["role"], m["id"]) for m in dumped] == [
-        ("user", "hermes:msg:1"), ("assistant", "hermes:msg:2"), ("tool", "hermes:msg:3"), ("assistant", "hermes:msg:7")
+        ("user", "hermes:msg:1"),
+        ("assistant", "hermes:msg:2"),
+        ("tool", "hermes:msg:3"),
+        ("assistant", "hermes:msg:7"),
     ]
     assert dumped[0]["content"][1] == {"type": "image", "source": {"type": "data", "value": "AAAA", "mimeType": "image/png"}}
     assert [c["function"] for c in dumped[1]["toolCalls"]] == [{"name": "calc", "arguments": "{}"}]
@@ -374,8 +388,7 @@ async def test_dropped_stream_resumes_from_last_event_id() -> None:
 
 
 async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None:
-    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, asyncio.Event()],
-                      [{"event": "message.delta", "delta": "Newer"}, asyncio.Event()])
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, asyncio.Event()], [{"event": "message.delta", "delta": "Newer"}, asyncio.Event()])
     agent = make_agent(fake)
     first = asyncio.create_task(collect(agent.run(agent_input())))
     await until(streaming(fake))
@@ -394,9 +407,7 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
     assert isinstance(late[-1], RunFinishedEvent)
     assert late[-1].outcome
     assert late[-1].outcome.type == "cancelled"
-    assert [c[:2] for c in fake.calls if c[0] == "POST"] == [
-        ("POST", "/v1/runs"), ("POST", "/v1/runs/run_1/stop"), ("POST", "/v1/runs")
-    ]
+    assert [c[:2] for c in fake.calls if c[0] == "POST"] == [("POST", "/v1/runs"), ("POST", "/v1/runs/run_1/stop"), ("POST", "/v1/runs")]
 
     assert text(await first) == "Working"
     record = await agent.store.get("t1")  # the finished run_1 did not release run_2
@@ -439,13 +450,15 @@ async def test_suspend_never_restores_an_answered_older_or_foreign_approval() ->
 
 async def test_answered_approval_at_seq_0_does_not_look_like_truncation() -> None:
     gate = asyncio.Event()
-    fake = FakeHermes([
-        {"event": "approval.request", "request_id": "req-1", "command": "ls"},
-        {"event": "message.delta", "delta": "Hel"},
-        gate,
-        {"event": "message.delta", "delta": "lo"},
-        {"event": "run.completed", "output": "Hello", "completed": True},
-    ])
+    fake = FakeHermes(
+        [
+            {"event": "approval.request", "request_id": "req-1", "command": "ls"},
+            {"event": "message.delta", "delta": "Hel"},
+            gate,
+            {"event": "message.delta", "delta": "lo"},
+            {"event": "run.completed", "output": "Hello", "completed": True},
+        ]
+    )
     agent = make_agent(fake)
     await collect(agent.run(agent_input()))
     resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
@@ -510,8 +523,7 @@ async def test_stop_endpoint_cancels_the_run() -> None:
 
 async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> None:
     gate = asyncio.Event()
-    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate,
-                       {"event": "run.completed", "output": "Working", "completed": True}])
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate, {"event": "run.completed", "output": "Working", "completed": True}])
     seen: list[tuple[str, str | None]] = []
 
     async def authorize(ctx: HookContext) -> bool:
@@ -545,9 +557,7 @@ async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> No
         assert invalid.status_code == 400
         assert invalid.json()["error"]["code"] == "invalid_input"
         assert not any(path.endswith("/stop") for _, path, _ in fake.calls)  # validated before stopping run_1
-        rejoin = asyncio.create_task(
-            client.post("/agent/connect", json=agent_input("r3").model_dump(mode="json", by_alias=True), headers=owner)
-        )
+        rejoin = asyncio.create_task(client.post("/agent/connect", json=agent_input("r3").model_dump(mode="json", by_alias=True), headers=owner))
         await asyncio.sleep(0.05)
         gate.set()
         response, rejoined = await run, await rejoin
@@ -666,11 +676,13 @@ def answer(run_id: str, interrupt: str) -> RunAgentInput:
 
 
 async def test_polled_approvals_can_be_answered_after_a_streamed_one() -> None:
-    fake = StreamGoneHermes([
-        {"event": "approval.request", "request_id": "A", "command": "ls"},
-        {"event": "approval.request", "request_id": "B", "command": "rm"},
-        {"event": "run.completed", "output": "done", "completed": True},
-    ])
+    fake = StreamGoneHermes(
+        [
+            {"event": "approval.request", "request_id": "A", "command": "ls"},
+            {"event": "approval.request", "request_id": "B", "command": "rm"},
+            {"event": "run.completed", "output": "done", "completed": True},
+        ]
+    )
     fake.gone = False
     agent = make_agent(fake)
     assert interrupts(await collect(agent.run(agent_input()))) == ["A"]
@@ -711,12 +723,14 @@ class RacingClient(HermesRunsClient):
 
 
 async def test_rejoin_withdraws_an_approval_another_client_answered() -> None:
-    fake = FakeHermes([
-        {"event": "approval.request", "request_id": "A", "command": "ls"},
-        {"event": "message.delta", "delta": "one"},
-        {"event": "approval.request", "request_id": "B", "command": "rm"},
-        {"event": "run.completed", "output": "one", "completed": True},
-    ])
+    fake = FakeHermes(
+        [
+            {"event": "approval.request", "request_id": "A", "command": "ls"},
+            {"event": "message.delta", "delta": "one"},
+            {"event": "approval.request", "request_id": "B", "command": "rm"},
+            {"event": "run.completed", "output": "one", "completed": True},
+        ]
+    )
     client = RacingClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport()))
     agent = HermesAgent(client, poll_interval=0.01)
     await collect(agent.run(agent_input()))

@@ -146,13 +146,9 @@ class HermesRunsClient:
         if self._owns_http:
             await self._http.aclose()
 
-    async def _request(
-        self, method: str, path: str, *, json_body: Any = None, headers: Mapping[str, str] | None = None
-    ) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, *, json_body: Any = None, headers: Mapping[str, str] | None = None) -> dict[str, Any]:
         try:
-            response = await self._http.request(
-                method, self._base + path, json=json_body, headers={**self._headers, **(headers or {})}
-            )
+            response = await self._http.request(method, self._base + path, json=json_body, headers={**self._headers, **(headers or {})})
         except httpx.TransportError as exc:
             raise HermesUnreachableError(f"{method} {path}: {exc!r}") from exc
         _raise_for_status(response, response.content)
@@ -227,7 +223,9 @@ class HermesRunsClient:
                 headers["Last-Event-ID"] = str(last_seq)
             try:
                 async with self._http.stream(
-                    "GET", f"{self._base}/v1/runs/{run_id}/events", headers=headers,
+                    "GET",
+                    f"{self._base}/v1/runs/{run_id}/events",
+                    headers=headers,
                     timeout=self._stream_timeout,
                 ) as response:
                     if response.status_code == 404:
@@ -249,7 +247,11 @@ class HermesRunsClient:
                 raise RunStreamGoneError(f"{run_id}: stream kept dropping ({failure})")
             logger.info(
                 "Event stream of Hermes run %s dropped (%s), reconnecting after seq %d (%d/%d)",
-                run_id, failure, last_seq, failures, self.max_reconnects,
+                run_id,
+                failure,
+                last_seq,
+                failures,
+                self.max_reconnects,
             )
             await asyncio.sleep(min(0.25 * 2**failures, 5.0))
 
