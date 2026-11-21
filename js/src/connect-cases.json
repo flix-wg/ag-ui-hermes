@@ -16,7 +16,8 @@
    {
     "type": "RUN_STARTED",
     "threadId": "t1",
-    "runId": "r2"
+    "runId": "r2",
+    "protocolVersion": "1.0"
    },
    {
     "type": "MESSAGES_SNAPSHOT",
@@ -95,7 +96,8 @@
    {
     "type": "RUN_STARTED",
     "threadId": "t1",
-    "runId": "r2"
+    "runId": "r2",
+    "protocolVersion": "1.0"
    },
    {
     "type": "MESSAGES_SNAPSHOT",
@@ -214,7 +216,8 @@
    {
     "type": "RUN_STARTED",
     "threadId": "t1",
-    "runId": "r2"
+    "runId": "r2",
+    "protocolVersion": "1.0"
    },
    {
     "type": "MESSAGES_SNAPSHOT",
@@ -336,7 +339,8 @@
    {
     "type": "RUN_STARTED",
     "threadId": "t1",
-    "runId": "r2"
+    "runId": "r2",
+    "protocolVersion": "1.0"
    },
    {
     "type": "MESSAGES_SNAPSHOT",
