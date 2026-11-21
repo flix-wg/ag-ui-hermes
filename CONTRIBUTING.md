@@ -2,7 +2,7 @@
 
 ## Setup
 
-Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 22+ with npm.
+Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 22.18+ or 24.11+ with npm (the `js/` build tool needs it; the published package runs on Node 22+).
 
 ```sh
 uv sync --all-extras

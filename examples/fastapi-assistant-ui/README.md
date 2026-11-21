@@ -10,7 +10,7 @@ A minimal chat in front of a Hermes Agent: streaming text, tool calls, approval 
 - `web/`: Vite + React + `@assistant-ui/react` + `@assistant-ui/react-ag-ui`, using the local
   `js/` package.
 
-Needs [uv](https://docs.astral.sh/uv/), Node 22.12+ and npm. Run everything from this
+Needs [uv](https://docs.astral.sh/uv/), Node 22.18+ (or 24.11+, as the `js/` build tool needs) and npm. Run everything from this
 directory.
 
 ## Demo without Hermes
