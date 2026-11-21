@@ -46,6 +46,20 @@ describe("HermesAgent", () => {
     expect(init).toMatchObject({ method: "GET", headers: { "X-CSRF-Token": "late" } });
   });
 
+  it("keeps working after clone(): dynamic headers and connect still go through fetch", async () => {
+    const fetch = vi.fn(async () => sse(replay));
+    const cloned = agentWith(fetch).clone();
+
+    await cloned.runAgent();
+    await cloned.connectAgent();
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetch.mock.calls as unknown as [string, RequestInit][]) {
+      expect(init.headers).toMatchObject({ "X-Static": "1", "X-CSRF-Token": "csrf" });
+    }
+    expect((fetch.mock.calls[1] as unknown as [string])[0]).toBe("https://app.test/agent/connect");
+  });
+
   it("rejects getCapabilities on a non-2xx response", async () => {
     const agent = agentWithAsync(vi.fn(async () => new Response("no", { status: 404 })));
     await expect(agent.getCapabilities()).rejects.toThrow("HTTP 404");

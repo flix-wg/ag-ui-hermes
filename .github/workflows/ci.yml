@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -94,7 +94,7 @@ jobs:
         working-directory: js
       - run: npm run build
         working-directory: js
-      - run: npm pack --pack-destination ../dist-js
+      - run: mkdir -p dist-js && npm pack --pack-destination ../dist-js
         working-directory: js
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

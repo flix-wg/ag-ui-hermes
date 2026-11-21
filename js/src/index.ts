@@ -43,14 +43,15 @@ export class HermesAgent extends HttpAgent {
     this.getHeaders = config.getHeaders;
     this.baseUrl = base;
     this.rawFetch = this.fetch;
-    this.fetch = this.withDynamicHeaders;
+    this.fetch = (url, init) => this.withDynamicHeaders(url, init);
   }
 
   // HttpAgent builds request options synchronously, so dynamic headers are merged at the fetch layer.
-  private withDynamicHeaders: HttpAgent["fetch"] = async (url, init) => {
+  // A method, not an instance field: clone() uses Object.create and would skip field initializers.
+  private async withDynamicHeaders(url: Parameters<HttpAgent["fetch"]>[0], init: Parameters<HttpAgent["fetch"]>[1]) {
     const dynamic = await this.getHeaders?.();
     return this.rawFetch(url, dynamic ? { ...init, headers: { ...(init.headers as Record<string, string>), ...dynamic } } : init);
-  };
+  }
 
   /** Fetches `GET <url>/capabilities`. */
   async getCapabilities(): Promise<AgentCapabilities> {
@@ -96,7 +97,7 @@ export class HermesAgent extends HttpAgent {
     cloned.getHeaders = this.getHeaders;
     cloned.baseUrl = this.baseUrl;
     cloned.rawFetch = this.rawFetch;
-    cloned.fetch = cloned.withDynamicHeaders;
+    cloned.fetch = (url, init) => cloned.withDynamicHeaders(url, init);
     return cloned;
   }
 }

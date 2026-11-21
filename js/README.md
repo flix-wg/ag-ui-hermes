@@ -8,11 +8,11 @@ server), `getHeaders` and `getCapabilities()`.
 ## Install
 
 ```bash
-npm install ag-ui-hermes @ag-ui/client rxjs
+npm install ag-ui-hermes
 ```
 
 Peer dependencies: `@ag-ui/client` `~1.0.3` (tested with 1.0.3 and 1.0.4; the agent uses protected
-`HttpAgent` internals, so minor versions are not allowed) and `rxjs` `^7.8.0`. Node >= 20. ESM and CJS.
+`HttpAgent` internals, so minor versions are not allowed) and `rxjs` `^7.8.0`. Node >= 22. ESM and CJS.
 
 ## Usage with assistant-ui
 
@@ -70,7 +70,7 @@ response.
 
 ## Example
 
-[`examples/fastapi-assistant-ui`](../examples/fastapi-assistant-ui) is a complete chat with approvals
+[`examples/fastapi-assistant-ui`](https://github.com/flix-wg/ag-ui-hermes/tree/main/examples/fastapi-assistant-ui) is a complete chat with approvals
 and reconnect.
 
 ## License
