@@ -24,6 +24,9 @@ from .client import HermesAPIError, HermesError, HermesRunsClient, RunStreamGone
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
 from .translator import TERMINAL_STATUSES, CustomEventMapper, HermesTranslator, ToolFilter
 
+_STARTED_HISTORY = 32
+"""Started AG-UI runs per thread whose late retries still find their Hermes run."""
+
 StateProvider = Callable[[str], Awaitable[Any]]
 """``thread_id -> state``; ``None`` emits nothing."""
 
@@ -98,9 +101,12 @@ class HermesAgent:
 
     async def _start(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
         record = await self.store.get(input.thread_id) or ThreadRecord()
-        if record.run_id and input.run_id in record.agui_run_ids:
-            # A transport retry of the same AG-UI run rejoins its Hermes run.
-            async for event in self._stream(input, self.translator(record.run_id)):
+        earlier = record.started.get(input.run_id)
+        if earlier is None and record.run_id and input.run_id in record.agui_run_ids:
+            earlier = record.run_id
+        if earlier is not None:
+            # A transport retry rejoins its own Hermes run, even one a newer run replaced.
+            async for event in self._stream(input, self.translator(earlier)):
                 yield event
             return
         if record.run_id:
@@ -116,9 +122,13 @@ class HermesAgent:
             extra=self.run_body(input) if self.run_body else None,
         )
         run_id = started.run_id
+        latest = list({**record.started, input.run_id: run_id}.items())[-_STARTED_HISTORY:]
         await self.store.put(
             input.thread_id,
-            ThreadRecord(session_id=record.session_id, run_id=run_id, agui_run_ids=[input.run_id]),
+            ThreadRecord(
+                session_id=record.session_id, run_id=run_id, agui_run_ids=[input.run_id],
+                started=dict(latest),
+            ),
         )
         if record.session_id is None:
             session_id = (await self.client.get_run(run_id)).get("session_id") or None

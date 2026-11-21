@@ -121,7 +121,8 @@ HermesAgent(
 - Only the text of the last user message is sent. History lives in the Hermes session; when the
   store knows no session for a thread, prior text messages go as `conversation_history`.
 - A new run on a thread stops that thread's unfinished Hermes run. A retry of the same AG-UI run
-  (same `runId`) rejoins it instead.
+  (same `runId`) rejoins that run's own Hermes run instead, even after a newer run replaced it;
+  the record keeps the last 32 started runs per thread.
 - Hermes keeps 1000 events per run and drops a run's stream about five minutes after it started if
   no client is subscribed. Rejoining after that falls back to polling the run status and shows only
   the final output. If the backlog has dropped the start of the text being streamed, that text is

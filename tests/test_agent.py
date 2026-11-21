@@ -140,10 +140,9 @@ async def test_dropped_stream_resumes_from_last_event_id() -> None:
     assert events[-1].type.value == "RUN_FINISHED"
 
 
-async def test_retry_rejoins_and_a_replaced_run_is_not_released() -> None:
-    gate = asyncio.Event()
-    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate,
-                       {"event": "run.completed", "output": "Working", "completed": True}])
+async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None:
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, asyncio.Event()],
+                      [{"event": "message.delta", "delta": "Newer"}, asyncio.Event()])
     agent = make_agent(fake)
     first = asyncio.create_task(collect(agent.run(agent_input())))
     while not fake.runs or not fake.runs["run_1"].backlog:
@@ -156,11 +155,21 @@ async def test_retry_rejoins_and_a_replaced_run_is_not_released() -> None:
     await retry.aclose()
     assert [c[:2] for c in fake.calls if c[0] == "POST"] == [("POST", "/v1/runs")]
 
-    await agent.store.put("t1", ThreadRecord(run_id="run_newer", agui_run_ids=["r9"]))
-    gate.set()
+    second = asyncio.create_task(collect(agent.run(agent_input("r2"))))  # replaces run_1
+    while "run_2" not in fake.runs or not fake.runs["run_2"].backlog:
+        await asyncio.sleep(0.01)
+    late = await collect(agent.run(agent_input()))  # a retry of r1 that arrives after r2
+    assert text(late) == "Working"
+    assert isinstance(late[-1], RunFinishedEvent) and late[-1].outcome
+    assert late[-1].outcome.type == "cancelled"
+    assert [c[:2] for c in fake.calls if c[0] == "POST"] == [
+        ("POST", "/v1/runs"), ("POST", "/v1/runs/run_1/stop"), ("POST", "/v1/runs")
+    ]
+
     assert text(await first) == "Working"
-    record = await agent.store.get("t1")
-    assert record and record.run_id == "run_newer"
+    record = await agent.store.get("t1")  # the finished run_1 did not release run_2
+    assert record and record.run_id == "run_2" and record.agui_run_ids == ["r2"]
+    second.cancel()
 
 
 async def test_stop_endpoint_cancels_the_run() -> None:

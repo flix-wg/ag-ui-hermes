@@ -62,7 +62,9 @@ the replay did not rebuild. An approval after truncation is never bound to a too
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the
 agent polls the run status until it is terminal and emits the final output.
 
-A run request that repeats an AG-UI `runId` the thread's Hermes run is attached to (a transport
-retry) rejoins that run the same way instead of stopping it and starting a new one.
+A run request that repeats the `runId` of one of the thread's last 32 started AG-UI runs (a
+transport retry) rejoins that run's Hermes run the same way instead of starting a new one. A retry
+that arrives after a newer run replaced its run neither stops the newer run nor takes over the
+thread: it replays its own, now cancelled, run.
 
 Python clients use `HermesAgent.connect()` the same way.

@@ -18,6 +18,8 @@ class ThreadRecord:
     """AG-UI runs attached to ``run_id`` (start, resume, connect)."""
     pending_interrupts: list[str] = field(default_factory=list)
     """Approval request ids the last AG-UI run was interrupted with."""
+    started: dict[str, str] = field(default_factory=dict)
+    """AG-UI run id -> Hermes run id for the thread's latest started runs, oldest first."""
 
 
 class ThreadStore(Protocol):
