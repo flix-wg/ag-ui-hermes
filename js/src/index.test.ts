@@ -23,7 +23,34 @@ const agentWith = (fetch: ReturnType<typeof vi.fn>) =>
     fetch,
   });
 
+const agentWithAsync = (fetch: ReturnType<typeof vi.fn>) =>
+  new HermesAgent({
+    url: "https://app.test/agent",
+    getHeaders: async () => ({ "X-CSRF-Token": "late" }),
+    fetch,
+  });
+
 describe("HermesAgent", () => {
+  it("awaits an async getHeaders on run and sends GET capabilities", async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.endsWith("/capabilities") ? Response.json({ identity: { name: "hermes" } }) : sse(replay),
+    );
+    const agent = agentWithAsync(fetch);
+
+    await agent.runAgent();
+    expect((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].headers).toMatchObject({ "X-CSRF-Token": "late", "Content-Type": "application/json" });
+
+    expect(await agent.getCapabilities()).toEqual({ identity: { name: "hermes" } });
+    const [url, init] = fetch.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("https://app.test/agent/capabilities");
+    expect(init).toMatchObject({ method: "GET", headers: { "X-CSRF-Token": "late" } });
+  });
+
+  it("rejects getCapabilities on a non-2xx response", async () => {
+    const agent = agentWithAsync(vi.fn(async () => new Response("no", { status: 404 })));
+    await expect(agent.getCapabilities()).rejects.toThrow("HTTP 404");
+  });
+
   it("rejoins through the connect endpoint with injected headers", async () => {
     const fetch = vi.fn(async () => sse(replay));
     const agent = agentWith(fetch);
@@ -44,6 +71,7 @@ describe("HermesAgent", () => {
     expect(fetch).not.toHaveBeenCalled();
     await agent.connectAgent({ runId: "r9" });
     agent.abortRun();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
 
     const [url, init] = fetch.mock.calls[1] as unknown as [string, RequestInit];
     expect(url).toBe("https://app.test/agent/stop");
