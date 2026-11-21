@@ -7,6 +7,7 @@ from ag_ui.core import (
     FunctionCall,
     Message,
     MessagesSnapshotEvent,
+    RawEvent,
     ReasoningMessage,
     RunFinishedEvent,
     TextMessageContentEvent,
@@ -39,7 +40,10 @@ RUN: list[dict[str, Any]] = [
     {"event": "tool.completed", "tool": "light.turn_on", "duration": 0.3, "error": True, "preview": "hall offline"},
     {"event": "dashboard.scene", "value": 1},
     {"event": "message.delta", "delta": "Kitchen is on."},
-    {"event": "run.completed", "output": "Kitchen is on.", "completed": True},
+    {"event": "run.completed", "output": "Kitchen is on.", "completed": True,
+     "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150, "cache_read_tokens": 100,
+               "cache_write_tokens": 0},
+     "runtime": {"provider": "openrouter", "model": "glm-5", "route_source": "global"}},
 ]
 
 
@@ -69,15 +73,26 @@ def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:
     ]
     assert starts[0].parent_message_id == "run_1:msg:0"
     finished = events[-1]
-    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert isinstance(finished, RunFinishedEvent)
+    assert finished.outcome
     assert finished.outcome.type == "success"
+    assert events[0].model_dump(by_alias=True, exclude_none=True)["protocolVersion"] == "1.0"
+    assert finished.usage
+    assert finished.usage[0].model_dump(by_alias=True, exclude_none=True) == {
+        "provider": "openrouter", "model": "glm-5", "inputTokens": 120, "outputTokens": 30,
+        "totalTokens": 150, "cachedInputTokens": 100,
+    }
 
     replayed = feed_all(HermesTranslator("run_1", tool_filter=hide_secrets), RUN)
     assert [e.model_dump() for e in replayed] == [e.model_dump() for e in events]
 
-    passthrough = feed_all(HermesTranslator("run_1", passthrough_unknown=True), RUN)
-    custom = [e for e in passthrough if isinstance(e, CustomEvent)]
-    assert [c.name for c in custom] == ["hermes.dashboard.scene"]
+    passthrough = feed_all(HermesTranslator("run_1", passthrough_unknown=True, raw_unknown=True), RUN)
+    unknown = [e for e in passthrough if isinstance(e, (RawEvent, CustomEvent))]
+    assert [(e.type.value, e.event if isinstance(e, RawEvent) else e.name) for e in unknown] == [
+        ("RAW", {"event": "dashboard.scene", "value": 1, "seq": 9}), ("CUSTOM", "hermes.dashboard.scene")
+    ]
+    assert isinstance(unknown[0], RawEvent)
+    assert unknown[0].source == "hermes"
 
 
 def test_canonical_output_fixes_streamed_text() -> None:
@@ -107,19 +122,29 @@ def test_canonical_output_fixes_streamed_text() -> None:
 
 
 def test_approval_binds_a_tool_call_only_when_unambiguous() -> None:
-    events = feed_all(HermesTranslator("r", tool_filter=hide_secrets), [
+    t = HermesTranslator("r", tool_filter=hide_secrets, approval_choices={"once"}, approval_timeout=300)
+    events = feed_all(t, [
         {"event": "tool.started", "tool": "terminal", "preview": "ls"},
         {"event": "tool.started", "tool": "secret_lookup", "preview": "token"},
         {"event": "approval.request", "request_id": "q1", "command": "cat ~/.ssh/id_rsa",
-         "description": "read a private key"},
+         "description": "read a private key", "choices": ["once", "session", "always", "deny"],
+         "timestamp": 1795000000.25},
     ])
     finished = events[-1]
-    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert isinstance(finished, RunFinishedEvent)
+    assert finished.outcome
     assert finished.outcome.type == "interrupt"
     interrupt = finished.outcome.interrupts[0]
     assert (interrupt.reason, interrupt.tool_call_id) == ("confirmation", None)
     assert interrupt.message == "read a private key: cat ~/.ssh/id_rsa"
-    assert interrupt.metadata and interrupt.metadata["command"] == "cat ~/.ssh/id_rsa"
+    assert interrupt.metadata
+    assert interrupt.metadata["command"] == "cat ~/.ssh/id_rsa"
+    assert interrupt.response_schema == {
+        "type": "object",
+        "properties": {"choice": {"type": "string", "enum": ["once", "deny"]}},
+        "required": ["choice"],
+    }
+    assert interrupt.expires_at == "2026-11-18T11:11:40.250Z"
 
 
 def test_rejoin_replaces_the_clients_copy_with_a_full_replay() -> None:
@@ -135,7 +160,8 @@ def test_rejoin_replaces_the_clients_copy_with_a_full_replay() -> None:
         events += t.feed({**event, "seq": seq})
 
     reset = events[1]
-    assert isinstance(reset, MessagesSnapshotEvent) and [m.id for m in reset.messages] == ["u1"]
+    assert isinstance(reset, MessagesSnapshotEvent)
+    assert [m.id for m in reset.messages] == ["u1"]
     fresh = feed_all(HermesTranslator("run_1", tool_filter=hide_secrets), RUN)
     assert [e.model_dump() for e in events[2:]] == [e.model_dump() for e in fresh[1:]]
 
@@ -189,7 +215,8 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     approval.start("thread", "agui-run")
     approval.feed({"event": "tool.started", "tool": "terminal", "seq": 7})
     finished = approval.feed({"event": "approval.request", "request_id": "q1", "tool": "terminal", "seq": 8})[-1]
-    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert isinstance(finished, RunFinishedEvent)
+    assert finished.outcome
     assert finished.outcome.type == "interrupt"
     assert (finished.outcome.interrupts[0].reason, finished.outcome.interrupts[0].tool_call_id) == ("confirmation", None)
 
