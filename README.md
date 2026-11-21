@@ -22,14 +22,20 @@ pip install "ag-ui-hermes[fastapi]"
 ```python
 import os
 from fastapi import FastAPI
-from ag_ui_hermes import HermesAgent, HermesRunsClient
+from ag_ui_hermes import HermesAgent, HermesRunsClient, HookContext
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
+
+async def authorize(ctx: HookContext) -> bool:
+    return await user_owns_thread(ctx.request, ctx.thread_id)  # your check, see Authorization
 
 client = HermesRunsClient("http://127.0.0.1:8642", api_key=os.environ["API_SERVER_KEY"])
 app = FastAPI()
-add_hermes_fastapi_endpoint(app, HermesAgent(client), "/agent")
+add_hermes_fastapi_endpoint(app, HermesAgent(client, authorize=authorize), "/agent")
 # POST /agent (run), POST /agent/connect (rejoin), POST /agent/stop {"threadId", "runId"}
 ```
+
+`add_hermes_fastapi_endpoint` passes extra keyword arguments (`dependencies`, `tags`, ...) to
+every route. `HermesRunsClient` is an async context manager (or call `aclose()`).
 
 ```tsx
 import { HermesAgent } from "ag-ui-hermes";
@@ -87,8 +93,8 @@ which assistant-ui renders as a tool approval; otherwise it is `reason: "confirm
 holds the description and command; `metadata` carries `command`, `description`, `pattern_key` and
 `choices`. Resuming with `{"approved": true}` means `once`; `{"approved": false}` or a cancelled
 entry always means `deny`; `{"choice": "session"}` or a bare choice string asks for that choice.
-Only choices in `allowed_choices` (default `once`, `deny`) are accepted: any other choice fails
-the resumed run with `RUN_ERROR` and nothing is sent. Each pending interrupt is answered at most
+Only choices in `allowed_choices` (default `once`, `deny`) are accepted: any other choice is an
+input error (HTTP 400, see Errors) and nothing is sent. Each pending interrupt is answered at most
 once; entries for interrupts the thread is not waiting on are ignored. The resumed AG-UI run
 continues the same Hermes run.
 
@@ -98,25 +104,70 @@ after the last tool call. A missing suffix is appended, unstreamed output become
 
 ## Hooks
 
+Every hook gets a `HookContext` first: `action` (`"run"`, `"connect"` or `"stop"`),
+`thread_id`, `run_id`, `input` (the `RunAgentInput`, `None` for `stop`) and `request` (the
+Starlette `Request` from the FastAPI endpoint, or what you pass as `request=` to `run`,
+`connect`, `open_run`, `open_connect` and `stop`). Type aliases for each hook live in
+`ag_ui_hermes.agent`.
+
 ```python
 HermesAgent(
     client,
-    store=MyThreadStore(),                          # ThreadStore protocol: get/put_if_run ThreadRecord
-    tool_filter=lambda tool, preview, event: None if tool == "secrets" else (tool, preview),
-    custom_event_mapper=lambda event: None,         # host-specific events -> AG-UI events
-    state_provider=load_state,                      # async thread_id -> STATE_SNAPSHOT
-    state_refresh_tools={"ha_call_service"},        # snapshot again after these tools complete
-    run_body=lambda input: {"instructions": "..."}, # extra /v1/runs body fields
-    allowed_choices={"once", "session", "deny"},    # approval choices clients may send
+    store=MyThreadStore(),                                   # ThreadStore protocol, see Limitations
+    authorize=check_access,                                  # async ctx -> bool, see Authorization
+    tool_filter=lambda ctx, tool, preview, event: None if tool == "secrets" else (tool, preview),
+    custom_event_mapper=lambda ctx, event: None,             # host-specific events -> AG-UI events
+    state_provider=load_state,                               # async ctx -> state for STATE_SNAPSHOT
+    state_refresh_tools={"ha_call_service"},                 # snapshot again after these tools complete
+    run_body=lambda ctx: {"instructions": "..."},            # extra /v1/runs body fields
+    on_error=lambda ctx, exc: sentry_sdk.capture_exception(exc),
+    allowed_choices={"once", "session", "deny"},             # approval choices clients may send
+    approval_timeout=300,                                    # Hermes approval timeout, for expiresAt
+    poll_timeout=1800,                                       # give up polling a run whose stream is gone
 )
 ```
+
+## Authorization
+
+`threadId` is chosen by the client, so anyone who knows a thread id could rejoin, stop or answer
+approvals on it. Pass `authorize`: it runs before `run` (including resumes), `connect` and `stop`
+touch the thread, and returning `False` refuses the request. The endpoint then answers HTTP 403;
+`HermesAgent.run`/`connect` used directly end with `RUN_ERROR` code `forbidden`, and `stop` raises
+`AgentForbiddenError`. Without `authorize` every request is allowed, which only suits a
+single-user host or one that checks the thread in a route dependency.
+
+## Errors and logging
+
+A `RUN_ERROR` the adapter raises carries a fixed message and a stable `code`, never exception
+text, Hermes URLs or Hermes's error bodies. The cause goes to the `ag_ui_hermes` logger and to
+`on_error`.
+
+| `code` | Meaning |
+| --- | --- |
+| `invalid_input` | Nothing to send or resume, a disallowed or conflicting approval choice |
+| `forbidden` | `authorize` refused the request |
+| `hermes_unreachable` | Transport failure talking to Hermes (an idempotent start is retried first) |
+| `hermes_rejected` | Hermes answered with an HTTP error status |
+| `hermes_bad_response` | Hermes answered 2xx with a body that is not a JSON object |
+| `hermes_timeout` | The run did not finish within `poll_timeout` while its status was polled |
+| `store_conflict` | The thread store kept refusing compare-and-set writes |
+| `internal_error` | Any other exception (a store or hook failure, a bug) |
+| `failed`, `interrupted` | The Hermes run itself ended that way (the message is the run's `error`) |
+
+Input and authorization errors are found before anything is started or stopped. The endpoint
+answers them with HTTP 400 or 403 and `{"error": {"code", "message"}}` instead of a stream;
+`HermesAgent.open_run`/`open_connect` raise them as `AgentInputError`/`AgentForbiddenError` for
+hosts with their own routes. Every later failure ends the stream with `RUN_ERROR` (unless the run
+already finished). All errors derive from `HermesError`.
 
 ## Limitations
 
 - Hermes tool events carry no tool-call id or arguments. Completions are paired with starts in
   FIFO order per tool name, which is wrong if two calls of the same tool finish out of order; the
   call's arguments are not available (the `preview` summary is in `metadata`).
-- The default `InMemoryThreadStore` lives in one process; use a shared store for several workers.
+- The default `InMemoryThreadStore` lives in one process and keeps `max_threads` (10 000)
+  records, evicting the least recently used idle thread first; use a shared store for several
+  workers. `ThreadRecord.to_dict()`/`from_dict()` serialize a record with a `schema_version`.
   A store implements `get` and `put_if_run`. `put_if_run` must be an atomic compare-and-set:
   it writes only if the stored record still owns that Hermes run and still has the `version` the
   caller read, and bumps `version` (a missing record counts as an empty one with `run_id=None`,
