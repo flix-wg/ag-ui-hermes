@@ -477,14 +477,19 @@ class HermesTranslator:
     def _approval_request(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         request_id = event.get("request_id")
         iid = request_id if isinstance(request_id, str) and request_id else f"{self.id_prefix}approval:{key}"
-        bound = self._open_visible_call()
+        # Hermes names no tool call, so bind only when exactly one call is open.
+        bound = self._open_calls[0] if len(self._open_calls) == 1 else None
+        tool = event.get("tool")
+        if bound and (bound.hidden or (isinstance(tool, str) and tool and tool != bound.raw_name)):
+            bound = None
         description, command = event.get("description"), event.get("command")
         metadata = {k: event[k] for k in _APPROVAL_KEYS if event.get(k) is not None}
         metadata["hermesRunId"] = self.hermes_run_id
+        parts = [str(p) for p in (description, command) if p]
         self.pending_interrupts[iid] = Interrupt(
             id=iid,
             reason="tool_call" if bound else "confirmation",
-            message=str(description or command or "Approval required"),
+            message=": ".join(parts) or "Approval required",
             tool_call_id=bound.id if bound else None,
             metadata=metadata,
         )

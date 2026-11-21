@@ -99,3 +99,19 @@ def test_canonical_output_fixes_streamed_text() -> None:
     assert isinstance(snapshot.messages[1], AssistantMessage)
     assert snapshot.messages[1].content == "Final answer"
     assert rewritten[-1].type.value == "RUN_FINISHED"
+
+
+def test_approval_binds_a_tool_call_only_when_unambiguous() -> None:
+    events = feed_all(HermesTranslator("r", tool_filter=hide_secrets), [
+        {"event": "tool.started", "tool": "terminal", "preview": "ls"},
+        {"event": "tool.started", "tool": "secret_lookup", "preview": "token"},
+        {"event": "approval.request", "request_id": "q1", "command": "cat ~/.ssh/id_rsa",
+         "description": "read a private key"},
+    ])
+    finished = events[-1]
+    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert finished.outcome.type == "interrupt"
+    interrupt = finished.outcome.interrupts[0]
+    assert (interrupt.reason, interrupt.tool_call_id) == ("confirmation", None)
+    assert interrupt.message == "read a private key: cat ~/.ssh/id_rsa"
+    assert interrupt.metadata and interrupt.metadata["command"] == "cat ~/.ssh/id_rsa"
