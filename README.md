@@ -194,9 +194,17 @@ already finished). All errors derive from `HermesError`.
 
 ## Limitations
 
-- Hermes tool events carry no tool-call id or arguments. Completions are paired with starts in
-  FIFO order per tool name, which is wrong if two calls of the same tool finish out of order; the
-  call's arguments are not available (the `preview` summary is in `metadata`).
+- Frontend (client-provided) tools are not supported: Hermes runs every tool on the server and
+  `/v1/runs` has no way to hand a call to the client and wait for its result, so
+  `RunAgentInput.tools` is ignored. That needs a change in Hermes.
+- Tool-call ids and arguments exist only inside Hermes; its tool events carry neither. Streamed
+  calls get ids derived from the run and event `seq`, completions are paired with starts in FIFO
+  order per tool name (wrong if two calls of the same tool finish out of order), and arguments
+  are not available (the `preview` summary is in `metadata`). History restored on connect does
+  carry the stored ids and arguments.
+- Token usage covers the whole Hermes run: only the AG-UI run that sees it end reports it (on
+  `RUN_FINISHED`/`RUN_ERROR`), with the total across every resume. There is no per-step or
+  per-message usage, and an interrupted AG-UI run reports none.
 - The default `InMemoryThreadStore` lives in one process and keeps `max_threads` (10 000)
   records, evicting the least recently used idle thread first; use a shared store for several
   workers. `ThreadRecord.to_dict()`/`from_dict()` serialize a record with a `schema_version`.
