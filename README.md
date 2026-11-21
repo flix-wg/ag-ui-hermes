@@ -50,7 +50,7 @@ Closing the browser or switching threads only detaches: the Hermes run keeps goi
 `connect()` rejoins it later (see [docs/connect.md](docs/connect.md)). An explicit cancel calls
 `abortRun()`, which posts the thread and its last run id to `/agent/stop`; the server stops the
 Hermes run only if that AG-UI run started, resumed or rejoined it, so a late stop cannot cancel a
-newer run.
+newer run. `runId` is required; before its first run or connect the agent posts no stop.
 
 ## Event mapping
 

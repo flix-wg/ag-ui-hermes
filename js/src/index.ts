@@ -61,12 +61,15 @@ export class HermesAgent extends HttpAgent {
   }
 
   override abortRun(): void {
-    void this.fetch(this.stopUrl, {
-      method: "POST",
-      headers: { ...this.requestHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ threadId: this.threadId, runId: this.lastRunId }),
-      keepalive: true,
-    }).catch(() => undefined);
+    // Without a run of ours there is nothing the server would let us stop.
+    if (this.lastRunId !== undefined) {
+      void this.fetch(this.stopUrl, {
+        method: "POST",
+        headers: { ...this.requestHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId: this.threadId, runId: this.lastRunId }),
+        keepalive: true,
+      }).catch(() => undefined);
+    }
     super.abortRun();
   }
 

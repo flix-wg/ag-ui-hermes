@@ -11,7 +11,8 @@ explicit cancel calls `abortRun()`.
 
 The TypeScript `HermesAgent` therefore overrides `connect()` to post the `RunAgentInput` to
 `<url>/connect`, and `abortRun()` to also post `{threadId, runId}` to `<url>/stop`, where `runId` is
-the agent's last run or connect. The server stops the Hermes run only if that AG-UI run is attached
+the agent's last run or connect (without one it posts nothing; the server requires `runId`). The
+server stops the Hermes run only if that AG-UI run is attached
 to it (it started, resumed or rejoined it), so a delayed stop cannot cancel a newer run. Detaching
 just drops the HTTP stream, and the server never stops a Hermes run because its client went away.
 

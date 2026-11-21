@@ -85,12 +85,10 @@ class HermesAgent:
             async for event in events:
                 yield event
 
-    async def stop(self, thread_id: str, run_id: str | None = None) -> bool:
-        """Stop the thread's Hermes run; with ``run_id``, only if that AG-UI run owns it."""
+    async def stop(self, thread_id: str, run_id: str) -> bool:
+        """Stop the thread's Hermes run if AG-UI run ``run_id`` started, resumed or rejoined it."""
         record = await self.store.get(thread_id)
-        if record is None or record.run_id is None:
-            return False
-        if run_id is not None and run_id not in record.agui_run_ids:
+        if record is None or record.run_id is None or run_id not in record.agui_run_ids:
             return False
         try:
             await self.client.stop_run(record.run_id)

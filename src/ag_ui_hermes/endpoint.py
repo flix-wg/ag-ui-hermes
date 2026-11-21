@@ -18,7 +18,7 @@ from .agent import HermesAgent
 class StopRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     thread_id: str = Field(alias="threadId")
-    run_id: str | None = Field(default=None, alias="runId")
+    run_id: str = Field(alias="runId")
 
 
 def add_hermes_fastapi_endpoint(

@@ -185,6 +185,8 @@ async def test_stop_endpoint_cancels_the_run() -> None:
             await asyncio.sleep(0.01)
         late = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r0"})
         assert late.json() == {"stopped": False}
+        unnamed = await client.post("/agent/stop", json={"threadId": "t1"})
+        assert unnamed.status_code == 422
         stopped = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r1"})
         response = await run
 

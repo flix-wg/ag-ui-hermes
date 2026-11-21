@@ -40,6 +40,8 @@ describe("HermesAgent", () => {
   it("stops the server run it joined on an explicit abort", async () => {
     const fetch = vi.fn(async (url: string) => (url.endsWith("/stop") ? new Response("{}") : sse(replay)));
     const agent = agentWith(fetch);
+    agent.abortRun(); // no run yet: nothing to stop
+    expect(fetch).not.toHaveBeenCalled();
     await agent.connectAgent({ runId: "r9" });
     agent.abortRun();
 
