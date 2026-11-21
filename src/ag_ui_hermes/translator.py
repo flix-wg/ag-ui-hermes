@@ -658,7 +658,20 @@ class HermesTranslator:
             )
         ]
 
+    def reinterrupt(self, approvals: Iterable[Mapping[str, Any]]) -> list[BaseEvent]:
+        """End the AG-UI run again for ``approval.request`` events a resume left unanswered.
+
+        Feed or skip the backlog up to them first, so tool-call binding sees the same state.
+        """
+        for event in approvals:
+            self._hold_approval(event, str(event.get("seq")))
+        return self.interrupt()
+
     def _approval_request(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
+        self._hold_approval(event, key)
+        return self.interrupt()
+
+    def _hold_approval(self, event: Mapping[str, Any], key: str) -> None:
         request_id = event.get("request_id")
         iid = request_id if isinstance(request_id, str) and request_id else f"{self.id_prefix}approval:{key}"
         # Hermes names no tool call, so bind only when exactly one call is open and no
@@ -680,7 +693,6 @@ class HermesTranslator:
             expires_at=self._expires_at(event),
             metadata=metadata,
         )
-        return self.interrupt()
 
     def _response_schema(self, event: Mapping[str, Any]) -> dict[str, Any]:
         """``{"choice": ...}`` over the choices Hermes offers and the host allows."""

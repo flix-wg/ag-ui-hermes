@@ -303,9 +303,13 @@ class HermesAgent:
             r.answered_interrupts += [i for i in answers if i not in r.answered_interrupts]
 
         await self._update(input.thread_id, record.run_id, answered)
+        # The live stream never repeats an approval, so one left open must interrupt again.
+        unanswered = [i for i in record.pending_interrupts if i not in answers]
+        if unanswered and (await self.client.get_run(record.run_id)).get("status") != "waiting_for_approval":
+            unanswered = []
         await self._attach(input, record.run_id)
         translator = self._translator(ctx, record.run_id)
-        async for event in self._stream(ctx, translator, silent_until=record.cursor):
+        async for event in self._stream(ctx, translator, silent_until=record.cursor, reask=unanswered):
             yield event
 
     def _answers(self, entries: Sequence[ResumeEntry]) -> dict[str, str]:
@@ -349,20 +353,31 @@ class HermesAgent:
         t: HermesTranslator,
         *,
         silent_until: int = -1,
+        reask: Collection[str] = (),
     ) -> AsyncGenerator[BaseEvent, None]:
-        """Feed the run's events from seq 0; those up to ``silent_until`` only rebuild state."""
+        """Feed the run's events from seq 0; those up to ``silent_until`` only rebuild state.
+
+        Replayed approvals in ``reask`` end the run again once the replay reaches ``silent_until``.
+        """
         input = _input(ctx)
         run_id = t.hermes_run_id
         opened = False
+        held: list[Mapping[str, Any]] = []
         try:
             async with aclosing(self.client.events(run_id)) as stream:
                 async for event in stream:
                     seq = event.get("seq")
                     silent = isinstance(seq, int) and seq <= silent_until
+                    if held and not silent:
+                        break
                     if event.get("event") == "approval.request" and (
                         silent or not await self._approval_pending(run_id, event)
                     ):
                         t.skip(event)
+                        if silent and event.get("request_id") in reask:
+                            held.append(event)
+                            if seq == silent_until:
+                                break
                         continue
                     if silent:
                         t.feed(event)
@@ -386,6 +401,11 @@ class HermesAgent:
         if not opened:
             for opening in await self._open_events(ctx, t, replay=silent_until < 0):
                 yield opening
+        if held:
+            for item in await self._interrupted(input.thread_id, t, t.reinterrupt(held), silent_until):
+                yield item
+            if t.suspended:
+                return
         deadline = None if self.poll_timeout is None else asyncio.get_running_loop().time() + self.poll_timeout
         while not t.done:
             try:
@@ -414,11 +434,11 @@ class HermesAgent:
         An interrupt another client has already moved past (a newer approval is stored, or
         every request in it was answered) is withdrawn and the stream continues.
         """
-        items = t.feed(event)
-        if not t.suspended:
-            return items
         seq = event.get("seq")
-        if await self._suspend(thread_id, t, seq if isinstance(seq, int) else t.last_seq):
+        return await self._interrupted(thread_id, t, t.feed(event), seq if isinstance(seq, int) else t.last_seq)
+
+    async def _interrupted(self, thread_id: str, t: HermesTranslator, items: list[BaseEvent], cursor: int) -> list[BaseEvent]:
+        if not t.suspended or await self._suspend(thread_id, t, cursor):
             return items
         logger.info("Dropped a stale approval interrupt of Hermes run %s", t.hermes_run_id)
         t.pending_interrupts.clear()

@@ -49,7 +49,10 @@ agent checks `GET /v1/runs/{id}`: only a run still `waiting_for_approval` with t
 
 Resuming after an interrupt is different: the client already has everything up to the approval, so
 the agent posts the approval, replays silently up to the interrupt's `seq` to rebuild translator
-state, and emits only newer events. Open subagents are announced again in the new AG-UI run.
+state, and emits only newer events. Open subagents are announced again in the new AG-UI run. If
+the resume left a pending approval unanswered and `GET /v1/runs/{id}` still says
+`waiting_for_approval`, the replay stops at the interrupt and ends the run with it again: Hermes
+never repeats an `approval.request` on the live stream, so waiting would hang until it times out.
 
 If the backlog no longer starts at seq 0 (Hermes keeps 1000 events, and says `replay.truncated`),
 the replay cannot rebuild what the client holds, so there is no snapshot: the client keeps its

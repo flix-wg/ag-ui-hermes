@@ -96,7 +96,8 @@ entry always means `deny`; `{"choice": "session"}` or a bare choice string asks 
 Only choices in `allowed_choices` (default `once`, `deny`) are accepted: any other choice is an
 input error (HTTP 400, see Errors) and nothing is sent. Each pending interrupt is answered at most
 once; entries for interrupts the thread is not waiting on are ignored. The resumed AG-UI run
-continues the same Hermes run.
+continues the same Hermes run; if Hermes still waits on an approval the resume left unanswered,
+the run ends again with that interrupt.
 
 **Canonical output.** On `run.completed` the final `output` is compared with the text streamed
 after the last tool call. A missing suffix is appended, unstreamed output becomes a

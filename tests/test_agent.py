@@ -131,6 +131,25 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     assert second[-1].outcome.type == "success"
 
 
+async def test_resume_that_leaves_an_approval_open_interrupts_again() -> None:
+    fake = FakeHermes([
+        {"event": "approval.request", "request_id": "req-1", "command": "ls"},
+        {"event": "run.completed", "output": "done", "completed": True},
+    ])
+    agent = make_agent(fake)
+    await collect(agent.run(agent_input()))
+    stale = [ResumeEntry(interrupt_id="req-old", status="resolved", payload="once")]
+    again = await asyncio.wait_for(collect(agent.run(agent_input("r2", resume=stale))), 2)
+    finished = again[-1]
+    assert isinstance(finished, RunFinishedEvent)
+    assert finished.outcome
+    assert finished.outcome.type == "interrupt"
+    assert [i.id for i in finished.outcome.interrupts] == ["req-1"]
+    assert not any(path.endswith("/approval") for _, path, _ in fake.calls)
+    resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
+    assert text(await collect(agent.run(agent_input("r3", resume=resume)))) == "done"
+
+
 async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates() -> None:
     gate = asyncio.Event()
     fake = FakeHermes([
