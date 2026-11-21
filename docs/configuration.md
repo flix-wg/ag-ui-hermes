@@ -32,7 +32,9 @@ HermesAgent(client, *, store=None, authorize=None, tool_filter=None, custom_even
             passthrough_unknown=False, raw_unknown=False, state_provider=None,
             state_refresh_tools=(), run_body=None, on_error=None, poll_interval=1.0,
             poll_timeout=1800.0, allowed_choices=("once", "deny"), approval_timeout=None,
-            forwarded_props=())
+            forwarded_props=(), client_system_messages=False, client_context=True,
+            client_state=True, allow_image_urls=False, max_image_bytes=5 * 2**20,
+            max_message_image_bytes=20 * 2**20)
 ```
 
 | Option | Default | |
@@ -48,10 +50,16 @@ HermesAgent(client, *, store=None, authorize=None, tool_filter=None, custom_even
 | `run_body` | none | `(ctx) -> dict` of extra `POST /v1/runs` fields. |
 | `on_error` | none | `(ctx, exc) -> None`. Sees every error the agent reports. Its own exceptions are logged and ignored. |
 | `poll_interval` | `1.0` | Seconds between status polls when the event stream is gone. |
-| `poll_timeout` | `1800.0` | Seconds of polling before failing with `hermes_timeout`. `None` polls forever. |
+| `poll_timeout` | `1800.0` | Seconds of polling before failing with `hermes_timeout`. Also bounds a single status call that stalls. `None` polls and waits forever. |
 | `allowed_choices` | `("once", "deny")` | Approval choices a client may send. `deny` is always allowed. |
 | `approval_timeout` | `None` | Seconds Hermes waits on an approval. When set, interrupts carry `expiresAt`. |
 | `forwarded_props` | `()` | `forwardedProps` keys a client may set: any of `model`, `provider`, `model_options`. |
+| `client_system_messages` | `False` | Add the client's system and developer messages to the Hermes instructions. Ignored otherwise. |
+| `client_context` | `True` | Pass the client's `context` to the instructions as data. |
+| `client_state` | `True` | Pass the client's `state` to the instructions as data. |
+| `allow_image_urls` | `False` | Accept `http(s)` image URLs, which Hermes fetches. Only inline `data:` images otherwise. |
+| `max_image_bytes` | 5 MiB | Largest decoded inline image. `None` disables the limit. |
+| `max_message_image_bytes` | 20 MiB | Largest total of decoded inline images in one message. `None` disables the limit. |
 
 Type aliases for every hook (`Authorize`, `ToolFilter`, `StateProvider`, ...) live in
 `ag_ui_hermes.agent`.
@@ -82,28 +90,31 @@ How a `RunAgentInput` becomes a `POST /v1/runs` body:
 - **User turn.** The last user message becomes the Hermes `input`. It is text, or `text` and
   `image_url` parts when it carries images. An image-only message works. Audio, video and
   document parts are refused with `invalid_input`.
-  <!-- TODO(fix-lane): option names and defaults for image sources. -->
-  Images are accepted as inline data (`data:image/...`) up to `max_image_bytes` (default 5 MiB).
-  `http(s)` image URLs are refused unless `allow_image_urls=True`, because Hermes would fetch
-  them. Anything else is `invalid_input` (HTTP 400).
+  Images are accepted as inline data (`data:image/...`). Each may be up to `max_image_bytes`
+  (default 5 MiB) and one message's images up to `max_message_image_bytes` (default 20 MiB);
+  `None` disables a limit. `http(s)` image URLs are refused unless `allow_image_urls=True`,
+  because Hermes would fetch them. Anything else, or an image over a limit, is `invalid_input`
+  (HTTP 400).
 - **History.** Only the last user message is sent; the Hermes session holds the rest. When the
   store knows no session for the thread, earlier user and assistant text goes as
   `conversation_history`.
 - **Instructions.** Hermes `instructions` (its per-run system prompt addition, not stored in the
   session) are built on every run from:
   - the `instructions` a `run_body` hook returns;
-  <!-- TODO(fix-lane): option names for client system messages, context and state. -->
   - system and developer messages from the client, only with `client_system_messages=True`
     (off by default);
-  - `context` and `state`, in a delimited block labelled as client-supplied data. Each can be
-    switched off.
+  - `context` and `state`, as one JSON object inside a `<client_data>` block, preceded by a
+    sentence saying it is untrusted data and not instructions. `<`, `>` and `&` in the JSON are
+    escaped as `\u003c`, `\u003e` and `\u0026`, so the data cannot close the block. Each is
+    included by default and can be switched off with `client_context=False` or
+    `client_state=False`. Empty `context` and `state` add nothing.
 
   A change from one run to the next, such as a new state, costs a prompt-cache miss.
 - **Forwarded props.** `forwarded_props={"model"}` (any subset of `model`, `provider`,
   `model_options`) lets a client set those fields through `forwardedProps`. A wrongly typed
   value is `invalid_input`, and `run_body` fields win. Hermes refuses a model that conflicts
   with a session's model lock (`hermes_rejected`).
-- **Idempotency.** The `Idempotency-Key` is derived from the thread and run ids, so a retried
+- **Idempotency.** The `Idempotency-Key` is a SHA-256 hash of the thread and run ids, so a retried
   start of the same AG-UI run is recognized by Hermes. A retry with the same `runId` rejoins
   that run's Hermes run instead of starting a new one.
 - **Frontend tools.** `RunAgentInput.tools` is ignored.
@@ -131,9 +142,15 @@ Resume with a new run on the same thread whose `resume` answers it:
 
 A choice outside `allowed_choices` is `invalid_input` (HTTP 400) and nothing is sent, so add
 `session` or `always` to offer them. assistant-ui's built-in approval UI sends only
-approve/deny. Each pending interrupt is answered at most once; entries for other interrupts are
-ignored. The resumed AG-UI run continues the same Hermes run. If Hermes still waits on an
-approval the resume left unanswered, the run ends again with that interrupt.
+approve/deny.
+
+A resume must answer interrupts the thread knows: pending ones, or ones a resume already
+answered. Any other interrupt id is refused with `invalid_input` (HTTP 400), as is a resume
+when the thread has no interrupted run. Each pending interrupt is answered at most once. A late
+repeat of an answered id sends nothing to Hermes; if Hermes still waits on another approval the
+resume left open, the run ends again with that interrupt. The agent checks the run status for
+that approval's `request_id`, and uses the status's own approval when the event backlog no
+longer holds it. The resumed AG-UI run continues the same Hermes run.
 
 Hermes approvals time out on their own. Answering an expired one is ignored and the run
 continues.
@@ -141,9 +158,11 @@ continues.
 ## State
 
 With a `state_provider`, each stream (run, resume or connect) opens with a `STATE_SNAPSHOT`.
-After a tool in `state_refresh_tools` completes, the state is read again: a `STATE_DELTA`
-(RFC 6902 JSON Patch against the last state sent in that stream) when both states are JSON
-objects, nothing when it did not change, and a new snapshot otherwise. Capabilities then report
+After a tool in `state_refresh_tools` completes, and once more just before the run's
+`RUN_FINISHED` or `RUN_ERROR`, the state is read again: a `STATE_DELTA` (RFC 6902 JSON Patch
+against the last state sent in that stream) when both states are JSON objects, nothing when it
+did not change, and a new snapshot otherwise. A run that ends in an adapter-side error (see the
+`RUN_ERROR` codes in the README) gets no final state. Capabilities then report
 state snapshots and deltas.
 
 ## Thread store
@@ -159,10 +178,11 @@ writes; the agent re-reads and retries, and fails with `store_conflict` after 50
 
 `ThreadRecord.to_dict()` / `from_dict()` serialize a record with a `schema_version`.
 
-<!-- TODO(fix-lane): confirm the eviction rule. -->
 `InMemoryThreadStore(max_threads=10_000)` lives in one process and evicts the least recently
-used thread without a live Hermes run when full; threads with a live run are never evicted. Use
-a shared store (Redis, a database) when you run several workers.
+used threads without a Hermes run when full. A record with a live run is never evicted, since
+its run would lose its stop and approval mapping. When every record is live, the store grows
+past `max_threads` and logs a warning. Use a shared store (Redis, a database) when you run
+several workers.
 
 The record keeps the last 32 started AG-UI runs per thread, so a late transport retry still
 finds its Hermes run.

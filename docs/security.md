@@ -50,50 +50,54 @@ allowed). A client cannot widen that: any other choice is refused with HTTP 400 
 sent to Hermes. Add `session` or `always` only if you want users to grant standing permission.
 
 Each pending interrupt is answered at most once, and only interrupts the thread is actually
-waiting on are forwarded.
+waiting on are forwarded. A resume naming an interrupt id the thread neither waits on nor has
+already answered is refused with `invalid_input` (HTTP 400).
 
 ## What reaches the system prompt
 
 Hermes `instructions` become part of the system prompt for that run. They are built from:
 
-<!-- TODO(fix-lane): option names and the exact delimiter/label. -->
 - the `instructions` your `run_body` hook returns: trusted, yours;
 - client system and developer messages: ignored unless you set `client_system_messages=True`,
   since any client can send them;
-- `context` and `state`: placed in a delimited block labelled as client-supplied data, so the
-  model can tell them apart from your instructions. Each can be switched off. Labelling reduces
-  but does not prevent prompt injection; treat both as user input.
+- `context` and `state`: placed as JSON in a `<client_data>` block after a sentence that calls
+  it untrusted data, so the model can tell it from your instructions. `<`, `>` and `&` are
+  escaped, so the data cannot close the block. Both are on by default; switch them off with
+  `client_context=False` and `client_state=False`. Labelling reduces but does not prevent prompt
+  injection; treat both as user input.
 
 `forwardedProps` can only set `model`, `provider` or `model_options`, and only the keys you list
 in `forwarded_props` (none by default).
 
 ## Images
 
-<!-- TODO(fix-lane): option names and defaults. -->
-By default only inline `data:image/...` images up to `max_image_bytes` (5 MiB) are accepted.
-`http(s)` image URLs would make Hermes or its model provider fetch a client-chosen URL, so they
-are refused unless you set `allow_image_urls=True`. Everything else is refused with HTTP 400.
+By default only inline `data:image/...` images are accepted: up to `max_image_bytes` (5 MiB)
+each and `max_message_image_bytes` (20 MiB) per message. `None` disables a limit. `http(s)`
+image URLs would make Hermes or its model provider fetch a client-chosen URL, so they are
+refused unless you set `allow_image_urls=True`. Everything else, and anything over a limit, is
+refused with `invalid_input` (HTTP 400).
 
 ## Tool output and history
 
 Tool previews and results go to the client as Hermes sends them. Use `tool_filter` to hide or
 rewrite tools whose output the user should not see. It applies to live and replayed runs and
-<!-- TODO(fix-lane): confirm once merged. -->
-to the session history `connect` restores.
+to the session history `connect` restores. Restored tool calls always carry `"{}"` as
+arguments, and a restored result whose call is unknown or hidden is left out.
 
 ## Errors and logs
 
 `RUN_ERROR` and the endpoint's error bodies carry a fixed message and a stable `code`, never
 exception text, Hermes URLs or Hermes error bodies. The cause goes to the `ag_ui_hermes` logger
-and to `on_error`. Those logs can contain thread ids, Hermes run ids and Hermes error messages,
-so treat them like application logs with user data. The adapter does not log message content.
+and to `on_error`. Exceptions are logged with `exc_info`, so tracebacks and Hermes error
+messages reach the log. The logs can contain thread ids, Hermes run ids and those messages, but
+never request bodies, headers or tokens. The host owns its logging configuration, so treat
+these logs like application logs with user data.
 
 ## Resource use
 
-<!-- TODO(fix-lane): confirm the eviction rule. -->
-`InMemoryThreadStore` keeps at most `max_threads` records and never evicts a thread with a live
-run. A rejoin replays at most Hermes' 1000 events per run. Status polling of a run whose stream
-is gone stops after `poll_timeout`. Rate limiting and request size limits are up to your server.
+`InMemoryThreadStore` evicts idle threads beyond `max_threads` records but never a thread with
+a live run. If every record is live it grows past `max_threads` and logs a warning. A rejoin replays at most Hermes' 1000 events per run. Status polling of a run whose stream
+is gone, and a status call that stalls, stop after `poll_timeout`. Rate limiting and request size limits are up to your server.
 
 ## Reporting
 

@@ -23,7 +23,8 @@ just drops the HTTP stream, and the server never stops a Hermes run because its 
 load), a `MESSAGES_SNAPSHOT` of the session's stored conversation (`GET
 /api/sessions/{id}/messages`, the latest 500 rows; ids `hermes:msg:<row id>`) comes between them.
 A client that already holds messages keeps them, as on every other path. The restored tool calls
-and results go through `tool_filter` like live ones. A `RunsClient` without
+and results go through `tool_filter` like live ones. Their arguments are always `"{}"`, and a
+result whose call is unknown or hidden is omitted. A `RunsClient` without
 `session_messages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
 streams every event through a fresh translator, then follows the live stream.
 
@@ -56,8 +57,12 @@ Resuming after an interrupt is different: the client already has everything up t
 the agent posts the approval, replays silently up to the interrupt's `seq` to rebuild translator
 state, and emits only newer events. Open subagents are announced again in the new AG-UI run. If
 the resume left a pending approval unanswered and `GET /v1/runs/{id}` still says
-`waiting_for_approval`, the replay stops at the interrupt and ends the run with it again: Hermes
-never repeats an `approval.request` on the live stream, so waiting would hang until it times out.
+`waiting_for_approval` with that approval's `request_id`, the replay stops at the interrupt and
+ends the run with it again: Hermes never repeats an `approval.request` on the live stream, so
+waiting would hang until it times out. If the backlog has lost that `approval.request`, the
+approval in the run status is used instead. A resume that names an interrupt id the thread
+neither waits on nor has answered is refused with `invalid_input` (HTTP 400); a late repeat of
+an answered id is not an error.
 
 If the backlog no longer starts at seq 0 (Hermes keeps 1000 events, and says `replay.truncated`),
 the replay cannot rebuild what the client holds, so there is no snapshot: the client keeps its
@@ -71,7 +76,7 @@ unfinished call of that tool the client holds, or is dropped. An approval after 
 bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the
-agent polls the run status until it is terminal and emits the final output.
+agent polls the run status until it is terminal and emits the final output. `poll_timeout` bounds the polling and each stalled status call.
 
 A run request that repeats the `runId` of one of the thread's last 32 started AG-UI runs (a
 transport retry) rejoins that run's Hermes run the same way instead of starting a new one. A retry

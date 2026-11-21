@@ -14,8 +14,8 @@ First release.
 - Approvals as AG-UI interrupts, resumed by the next run on the thread; a resume that leaves an approval open ends with that interrupt again.
 - Rejoining a run with `connect`: the backlog is replayed after a `MESSAGES_SNAPSHOT` that drops the client's copy, then live events follow. Without a live run, `connect` restores the Hermes session's messages.
 - Explicit stop that only cancels the Hermes run the calling AG-UI run owns; a client disconnect only detaches.
-- Run input: image parts as `image_url` parts, `forwarded_props` for `model`, `provider` and `model_options`, idempotent run starts.
-- Host state through `state_provider`: `STATE_SNAPSHOT`, then `STATE_DELTA` (RFC 6902) after `state_refresh_tools`.
+- Run input: image parts as `image_url` parts, `forwarded_props` for `model`, `provider` and `model_options`, idempotent run starts. Tool completions pair with their start by `tool_call_id` or `id` when Hermes sends one. `poll_timeout` also bounds stalled status calls.
+- Host state through `state_provider`: `STATE_SNAPSHOT`, then `STATE_DELTA` (RFC 6902) after `state_refresh_tools` and before the run ends.
 - `GET <path>/capabilities` and `HermesAgent.capabilities()`.
 - Thread store protocol with compare-and-set writes, and a bounded `InMemoryThreadStore`.
 - FastAPI endpoint (`ag-ui-hermes[fastapi]`): run, connect, stop and capabilities routes.
@@ -27,9 +27,10 @@ First release.
 - `authorize` hook before every run, resume, connect, stop and capabilities request; refusals answer HTTP 403.
 - `RUN_ERROR` and error responses carry a fixed message and a stable `code`, never exception text or Hermes error bodies.
 - Clients can only send approval choices in `allowed_choices` (default `once` and `deny`).
-<!-- TODO(fix-lane): reconcile option names after the fix lane merges. -->
 - Client system and developer messages are ignored unless `client_system_messages=True`.
-- `context` and `state` reach the Hermes instructions only as a delimited block labelled as client-supplied data, and each can be switched off.
-- Images are accepted as inline data up to `max_image_bytes` (5 MiB); `http(s)` image URLs only with `allow_image_urls=True`.
-- `tool_filter` also applies to the session history `connect` restores.
-- `InMemoryThreadStore` never evicts a thread with a live run.
+- `context` and `state` reach the Hermes instructions only as JSON in a `<client_data>` block (`<`, `>` and `&` escaped) after an untrusted-data notice. `client_context=False` and `client_state=False` switch them off.
+- Images are accepted as inline data only, up to `max_image_bytes` (5 MiB) each and `max_message_image_bytes` (20 MiB) per message; `None` disables a limit. `http(s)` image URLs need `allow_image_urls=True`. Violations answer `invalid_input` (HTTP 400).
+- A resume that answers an interrupt the thread neither waits on nor has answered is refused with `invalid_input`.
+- `tool_filter` also applies to the session history `connect` restores; restored tool arguments are always `"{}"`.
+- `InMemoryThreadStore` never evicts a thread with a live run; at the cap it grows and logs a warning.
+- Logs never contain request bodies, headers or tokens; the host owns its logging.

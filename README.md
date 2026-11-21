@@ -134,11 +134,15 @@ Approvals arrive as interrupts: read them with `useAgUiInterrupts()` and answer 
 | `authorize` | none (allow all) | `async (ctx) -> bool`; `False` refuses with HTTP 403. |
 | `store` | `InMemoryThreadStore()` | Thread to Hermes session/run mapping. Use a shared store for several workers. |
 | `tool_filter` | none | Rename, rewrite or hide tool calls and results. |
-| `state_provider` | none | `async (ctx) -> state`, sent as `STATE_SNAPSHOT` at the start of each stream. |
+| `state_provider` | none | `async (ctx) -> state`, sent as `STATE_SNAPSHOT` at the start of each stream and refreshed before the run ends. |
 | `state_refresh_tools` | `()` | Tools after which the state is read again and sent as `STATE_DELTA`. |
 | `run_body` | none | Extra `POST /v1/runs` body fields, such as `instructions`. |
 | `allowed_choices` | `{"once", "deny"}` | Approval choices a client may send. |
 | `forwarded_props` | `()` | Which of `model`, `provider`, `model_options` a client may set. |
+| `client_system_messages` | `False` | Use the client's system and developer messages as instructions. |
+| `client_context`, `client_state` | `True` | Pass `context` and `state` to the instructions in a `<client_data>` JSON block. |
+| `allow_image_urls` | `False` | Accept `http(s)` image URLs; only inline `data:` images otherwise. |
+| `max_image_bytes`, `max_message_image_bytes` | 5 MiB, 20 MiB | Inline image size limits; `None` disables one. |
 | `on_error` | none | Sees every error, for example to report it. |
 
 All options, the run input mapping, approvals and the thread store contract are in
@@ -152,7 +156,7 @@ with `RUN_ERROR`. Its `message` is fixed and its `code` is one of:
 
 | `code` | Meaning |
 | --- | --- |
-| `invalid_input` | Nothing to send or resume, an unsupported input part, or a disallowed or conflicting approval choice. |
+| `invalid_input` | Nothing to send or resume, an unsupported input part, an image that is not allowed or too large, a disallowed or conflicting approval choice, or a resume naming an unknown interrupt. |
 | `forbidden` | `authorize` refused the request. |
 | `hermes_unreachable` | Transport failure talking to Hermes. A start with an idempotency key is retried first. |
 | `hermes_rejected` | Hermes answered with an HTTP error status. |
@@ -163,7 +167,7 @@ with `RUN_ERROR`. Its `message` is fixed and its `code` is one of:
 | `failed`, `interrupted` | The Hermes run itself ended that way. |
 
 `RUN_ERROR` never carries exception text, Hermes URLs or Hermes error bodies. The cause goes
-to the `ag_ui_hermes` logger and to `on_error`. A Hermes error on `/capabilities` or `/stop`
+to the `ag_ui_hermes` logger (with tracebacks, never request bodies, headers or tokens) and to `on_error`. A Hermes error on `/capabilities` or `/stop`
 answers HTTP 502. All exceptions derive from `HermesError`.
 
 ## Reconnect and stop
@@ -184,11 +188,12 @@ Details, including truncated backlogs and lost streams: [docs/connect.md](docs/c
 - **Frontend tools.** Not supported. Hermes runs every tool on the server, and `/v1/runs` cannot
   hand a call to the client and wait for its result, so `RunAgentInput.tools` is ignored. This
   needs a change in Hermes.
-- **Tool arguments and ids.** Hermes tool events carry neither. Ids are derived from the run id
-  and event `seq`, arguments are always `{}`, and the `preview` summary is in
-  `TOOL_CALL_START.metadata`. Completions pair with starts in order per tool name, which is wrong
-  if two calls of the same tool finish out of order. History restored on connect has the real
-  ids and arguments.
+- **Tool arguments and ids.** Hermes tool events carry no arguments. AG-UI ids are derived from
+  the run id and event `seq`, arguments are always `{}`, and the `preview` summary is in
+  `TOOL_CALL_START.metadata`. A completion pairs with its start by `tool_call_id` or `id` when
+  the event has one, and otherwise by tool name in start order, which is wrong if two calls of
+  the same tool finish out of order. History restored on connect has Hermes' call ids and
+  `"{}"` arguments.
 - **Reasoning.** Not streamed: Hermes sends each reasoning block once, complete.
 - **`ACTIVITY_*` and `STEP_*` events** are not emitted.
 - **Usage** covers the whole Hermes run, reported once by the AG-UI run that sees it end, as the
