@@ -4,6 +4,7 @@ from ag_ui.core import (
     AssistantMessage,
     BaseEvent,
     CustomEvent,
+    Message,
     MessagesSnapshotEvent,
     RunFinishedEvent,
     TextMessageContentEvent,
@@ -137,3 +138,19 @@ def test_replay_skips_what_the_client_already_holds() -> None:
     snapshot = out[-1]
     assert isinstance(snapshot, MessagesSnapshotEvent)
     assert [(m.id, m.content) for m in snapshot.messages] == [("run_1:msg:0", "Let me ")]
+
+
+def test_truncated_backlog_reconciles_from_the_final_output() -> None:
+    t = HermesTranslator("r")
+    held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id="r:msg:2", content="Hel")]
+    events = t.start("thread", "agui-run", held)
+    for seq, event in enumerate([
+        {"event": "message.delta", "delta": "lo wor"},  # the segment opened at seq 2, now evicted
+        {"event": "message.delta", "delta": "ld"},
+        {"event": "run.completed", "output": "Hello world"},
+    ], start=5):
+        events += t.feed({**event, "seq": seq})
+
+    assert not [e for e in events if isinstance(e, TextMessageContentEvent)]
+    snapshot = next(e for e in events if isinstance(e, MessagesSnapshotEvent))
+    assert [(m.id, m.content) for m in snapshot.messages] == [("u1", "Hi"), ("r:final", "Hello world")]

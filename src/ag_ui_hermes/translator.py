@@ -129,6 +129,8 @@ class HermesTranslator:
         self.done = False
         self.suspended = False
         self.truncated = False
+        self._head_unknown = False
+        """The backlog lost the start of the current text segment, so its id is unknown."""
         self.pending_interrupts: dict[str, Interrupt] = {}
         self.completed_tool: str | None = None
         """Raw name of the tool the last :meth:`feed` completed (for state refresh)."""
@@ -177,6 +179,8 @@ class HermesTranslator:
         if isinstance(seq, int):
             if seq <= self.last_seq:
                 return []
+            if self.last_seq < 0 and seq > 0:
+                self._truncate()
             self.last_seq = seq
             key = str(seq)
         else:
@@ -190,10 +194,12 @@ class HermesTranslator:
             text = event.get("text")
             if event.get("already_streamed") or not isinstance(text, str) or not text.strip():
                 return []
+            self._head_unknown = False
             out = self._close_text()
             out += self._text(text, key)
             return out + self._close_text()
         if name == "tool.started":
+            self._head_unknown = False
             return self._tool_started(event, key)
         if name == "tool.completed":
             return self._tool_completed(event, key)
@@ -208,7 +214,7 @@ class HermesTranslator:
         if name.startswith("run.") and name[4:] in TERMINAL_STATUSES:
             return self.finish({**event, "status": name[4:]})
         if name == "replay.truncated":
-            self.truncated = True
+            self._truncate()
             return []
         if name in _IGNORED:
             if name == "approval.responded" and isinstance(event.get("request_id"), str):
@@ -304,10 +310,18 @@ class HermesTranslator:
 
     # -- text -----------------------------------------------------------------
 
+    def _truncate(self) -> None:
+        self.truncated = True
+        self._head_unknown = self._head_unknown or not self._order
+
     def _text(self, delta: str, key: str) -> list[BaseEvent]:
         events: list[BaseEvent] = []
         seg = self._segment
         if seg is None or not seg.open or seg.tool_calls:
+            if self._head_unknown:
+                # Inventing an id would duplicate the client's message; run.completed's
+                # output reconciles the final answer.
+                return []
             events += self._close_text()
             seg = self._new_segment(f"{self.id_prefix}msg:{key}")
             seg.open = True
@@ -446,6 +460,7 @@ class HermesTranslator:
         text = event.get("text")
         if not isinstance(text, str) or not text.strip():
             return []
+        self._head_unknown = False
         events = self._close_text()
         rid = f"{self.id_prefix}reasoning:{key}"
         self._order.append(_Reasoning(id=rid, text=text))
