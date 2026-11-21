@@ -159,14 +159,14 @@ class HermesAgent:
                         silent or not await self._approval_pending(run_id, event)
                     ):
                         continue
-                    out = t.feed(event)
                     if silent:
+                        t.feed(event)
                         continue
                     if not opened:
                         opened = True
                         for opening in await self._open(t, input):
                             yield opening
-                    for item in out:
+                    for item in t.feed(event):
                         yield item
                     if t.completed_tool in self.state_refresh_tools:
                         for state in await self._state(input.thread_id):
