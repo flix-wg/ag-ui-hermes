@@ -10,8 +10,10 @@ switch (`resumeInFlightRun`). Leaving a thread or unmounting calls `detachActive
 explicit cancel calls `abortRun()`.
 
 The TypeScript `HermesAgent` therefore overrides `connect()` to post the `RunAgentInput` to
-`<url>/connect`, and `abortRun()` to also post `{threadId}` to `<url>/stop`. Detaching just drops
-the HTTP stream, and the server never stops a Hermes run because its client went away.
+`<url>/connect`, and `abortRun()` to also post `{threadId, runId}` to `<url>/stop`, where `runId` is
+the agent's last run or connect. The server stops the Hermes run only if that AG-UI run is attached
+to it (it started, resumed or rejoined it), so a delayed stop cannot cancel a newer run. Detaching
+just drops the HTTP stream, and the server never stops a Hermes run because its client went away.
 
 ## What the server sends
 
@@ -23,10 +25,12 @@ Replaying everything, rather than only a suffix, was chosen because:
 
 - The translator's ids depend only on the Hermes run id and event `seq`, so the replay names the
   same messages and tool calls the client already shows.
-- assistant-ui adopts assistant ids it already holds and replaces their content with the replayed
-  frames (`AgUiThreadController.replay.test.ts`: "adopts contiguous assistant IDs ...", "keeps
-  longer partial text when replay starts with its strict prefix"), so the same text is not appended
-  twice.
+- `@ag-ui/client`'s reducer applies a `TEXT_MESSAGE_START` for an id it holds to that message and
+  appends every delta, so replaying "Hello" onto a held "Hel" would give "HelHello". The connect
+  request's `messages` (what the client holds) therefore steer the replay: messages, tool calls,
+  results and reasoning the client already has are skipped, a text message is opened only when
+  there is text beyond the client's copy, and only that suffix is sent. If the client's copy is
+  not a prefix of the run's text, a `MESSAGES_SNAPSHOT` replaces it.
 - `@ag-ui/client` verifies each run on its own: `TEXT_MESSAGE_CONTENT` needs a `TEXT_MESSAGE_START`
   and `SUBAGENT_FINISHED` a `SUBAGENT_STARTED` in the same run, so a connect stream that started
   mid-message would be rejected.
@@ -41,7 +45,17 @@ Resuming after an interrupt is different: the client already has everything up t
 the agent posts the approval, replays silently up to the interrupt's `seq` to rebuild translator
 state, and emits only newer events. Open subagents are announced again in the new AG-UI run.
 
+If the backlog no longer starts at seq 0 (Hermes keeps 1000 events, and says `replay.truncated`),
+the text segment whose first delta was evicted has an unknown id. Its text is not streamed under
+an invented id; the next tool call, reasoning or interim message restores normal ids, and
+`run.completed` reconciles the final answer from the run's canonical `output` (a
+`MESSAGES_SNAPSHOT` when the client holds a stale partial). Text before a tool call whose start
+was evicted stays as the client last saw it.
+
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the
 agent polls the run status until it is terminal and emits the final output.
+
+A run request that repeats an AG-UI `runId` the thread's Hermes run is attached to (a transport
+retry) rejoins that run the same way instead of stopping it and starting a new one.
 
 Python clients use `HermesAgent.connect()` the same way.

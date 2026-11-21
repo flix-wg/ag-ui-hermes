@@ -27,7 +27,7 @@ from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 client = HermesRunsClient("http://127.0.0.1:8642", api_key=os.environ["API_SERVER_KEY"])
 app = FastAPI()
 add_hermes_fastapi_endpoint(app, HermesAgent(client), "/agent")
-# POST /agent (run), POST /agent/connect (rejoin), POST /agent/stop {"threadId": ...}
+# POST /agent (run), POST /agent/connect (rejoin), POST /agent/stop {"threadId", "runId"}
 ```
 
 ```tsx
@@ -48,7 +48,9 @@ export function Chat() {
 
 Closing the browser or switching threads only detaches: the Hermes run keeps going, and
 `connect()` rejoins it later (see [docs/connect.md](docs/connect.md)). An explicit cancel calls
-`abortRun()`, which posts to `/agent/stop`.
+`abortRun()`, which posts the thread and its last run id to `/agent/stop`; the server stops the
+Hermes run only if that AG-UI run started, resumed or rejoined it, so a late stop cannot cancel a
+newer run.
 
 ## Event mapping
 
@@ -72,14 +74,21 @@ Closing the browser or switching threads only detaches: the Hermes run keeps goi
 Ids are derived from the Hermes run id and the event `seq` (`<run>:msg:<seq>`,
 `<run>:tool:<seq>`, `<run>:tool:<seq>:result`, `<run>:reasoning:<seq>`), so replaying a run from
 seq 0 reproduces them exactly. Text after a tool call starts a new assistant message; tool calls
-attach to the latest assistant message (`parentMessageId`).
+attach to the latest assistant message (`parentMessageId`). The request's `messages` count as what
+the client already holds: a replay skips those messages, tool calls, results and reasoning and
+sends only text beyond the client's copy (or a `MESSAGES_SNAPSHOT` if that copy is not a prefix).
 
-**Approvals.** The interrupt id is the Hermes `request_id`. If a tool call is open, the interrupt
-has `reason: "tool_call"` and `toolCallId`, which assistant-ui renders as a tool approval;
-otherwise `reason: "confirmation"`. `metadata` carries `command`, `description`, `pattern_key`
-and `choices`. Resuming with `{"approved": true|false}` maps to `once`/`deny`, `{"choice": "session"}`
-or a bare choice string is passed through, and a cancelled resume entry denies. The resumed AG-UI
-run continues the same Hermes run.
+**Approvals.** The interrupt id is the Hermes `request_id`. Hermes does not say which tool call
+an approval belongs to, so only when exactly one visible tool call is open (and matches the
+approval's `tool`, if it names one) does the interrupt get `reason: "tool_call"` and `toolCallId`,
+which assistant-ui renders as a tool approval; otherwise it is `reason: "confirmation"`. `message`
+holds the description and command; `metadata` carries `command`, `description`, `pattern_key` and
+`choices`. Resuming with `{"approved": true}` means `once`; `{"approved": false}` or a cancelled
+entry always means `deny`; `{"choice": "session"}` or a bare choice string asks for that choice.
+Only choices in `allowed_choices` (default `once`, `deny`) are accepted: any other choice fails
+the resumed run with `RUN_ERROR` and nothing is sent. Each pending interrupt is answered at most
+once; entries for interrupts the thread is not waiting on are ignored. The resumed AG-UI run
+continues the same Hermes run.
 
 **Canonical output.** On `run.completed` the final `output` is compared with the text streamed
 after the last tool call. A missing suffix is appended, unstreamed output becomes a
@@ -96,6 +105,7 @@ HermesAgent(
     state_provider=load_state,                      # async thread_id -> STATE_SNAPSHOT
     state_refresh_tools={"ha_call_service"},        # snapshot again after these tools complete
     run_body=lambda input: {"instructions": "..."}, # extra /v1/runs body fields
+    allowed_choices={"once", "session", "deny"},    # approval choices clients may send
 )
 ```
 
@@ -105,14 +115,19 @@ HermesAgent(
   FIFO order per tool name, which is wrong if two calls of the same tool finish out of order; the
   call's arguments are not available (the `preview` summary is in `metadata`).
 - The default `InMemoryThreadStore` lives in one process; use a shared store for several workers.
+  A store implements `get`, `put` and `put_if_run` (write only if the record still owns that
+  Hermes run), which keeps a finished stream from releasing a newer run.
 - Only the text of the last user message is sent. History lives in the Hermes session; when the
   store knows no session for a thread, prior text messages go as `conversation_history`.
-- A new run on a thread stops that thread's unfinished Hermes run.
+- A new run on a thread stops that thread's unfinished Hermes run. A retry of the same AG-UI run
+  (same `runId`) rejoins it instead.
 - Hermes keeps 1000 events per run and drops a run's stream about five minutes after it started if
   no client is subscribed. Rejoining after that falls back to polling the run status and shows only
-  the final output.
+  the final output. If the backlog has dropped the start of the text being streamed, that text is
+  not shown again until `run.completed` replaces it with the final output; text before a tool call
+  whose start was dropped is not recovered.
 - Approval `choices` are exposed as Hermes sends them. assistant-ui's built-in approval UI sends
-  only approve/deny; `session`/`always` need a custom UI. Hermes approvals time out on their own;
+  only approve/deny; `session`/`always` need a custom UI and `allowed_choices`. Hermes approvals time out on their own;
   answering an expired one is ignored and the run continues.
 
 ## Development
