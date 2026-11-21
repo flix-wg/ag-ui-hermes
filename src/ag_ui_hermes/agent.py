@@ -183,7 +183,13 @@ class HermesAgent:
             for opening in await self._open(t, input):
                 yield opening
         while not t.done:
-            status = await self.client.get_run(run_id)
+            try:
+                status = await self.client.get_run(run_id)
+            except HermesAPIError as exc:
+                if exc.status == 404:  # Hermes forgot the run; release the thread
+                    record.run_id, record.cursor = None, -1
+                    await self.store.put(input.thread_id, record)
+                raise
             approval = status.get("approval")
             if status.get("status") == "waiting_for_approval" and isinstance(approval, dict):
                 for item in t.feed(approval):
