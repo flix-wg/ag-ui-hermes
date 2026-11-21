@@ -115,3 +115,25 @@ def test_approval_binds_a_tool_call_only_when_unambiguous() -> None:
     assert (interrupt.reason, interrupt.tool_call_id) == ("confirmation", None)
     assert interrupt.message == "read a private key: cat ~/.ssh/id_rsa"
     assert interrupt.metadata and interrupt.metadata["command"] == "cat ~/.ssh/id_rsa"
+
+
+def test_replay_skips_what_the_client_already_holds() -> None:
+    seen = HermesTranslator("run_1", tool_filter=hide_secrets)
+    feed_all(seen, RUN[:7])
+    held = [UserMessage(id="u1", content="Lights on?"), *seen.messages()]
+
+    t = HermesTranslator("run_1", tool_filter=hide_secrets)
+    events = t.start("thread", "agui-run-2", held)
+    for seq, event in enumerate(RUN):
+        events += t.feed({**event, "seq": seq})
+    assert [e.type.value for e in events] == [
+        "RUN_STARTED", "TOOL_CALL_RESULT",
+        "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED",
+    ]
+
+    diverged = HermesTranslator("run_1")
+    out = diverged.start("thread", "agui-run-2", [AssistantMessage(id="run_1:msg:0", content="Draft")])
+    out += diverged.feed({**RUN[0], "seq": 0})
+    snapshot = out[-1]
+    assert isinstance(snapshot, MessagesSnapshotEvent)
+    assert [(m.id, m.content) for m in snapshot.messages] == [("run_1:msg:0", "Let me ")]

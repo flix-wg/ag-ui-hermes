@@ -4,7 +4,9 @@ from typing import Any
 
 import httpx
 from ag_ui.core import (
+    AssistantMessage,
     BaseEvent,
+    Message,
     ResumeEntry,
     RunAgentInput,
     RunFinishedEvent,
@@ -27,10 +29,9 @@ def make_agent(fake: FakeHermes) -> HermesAgent:
     return HermesAgent(HermesRunsClient("http://hermes", "secret", http=http), poll_interval=0.01)
 
 
-def agent_input(run_id: str = "r1", **kwargs: Any) -> RunAgentInput:
-    return RunAgentInput(
-        thread_id="t1", run_id=run_id, messages=[UserMessage(id="u1", content="Hi")], **kwargs
-    )
+def agent_input(run_id: str = "r1", messages: list[Message] | None = None, **kwargs: Any) -> RunAgentInput:
+    messages = messages or [UserMessage(id="u1", content="Hi")]
+    return RunAgentInput(thread_id="t1", run_id=run_id, messages=messages, **kwargs)
 
 
 async def collect(events: AsyncIterator[BaseEvent]) -> list[BaseEvent]:
@@ -106,10 +107,13 @@ async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates()
     assert not any(path.endswith("/stop") for _, path, _ in fake.calls)
 
     gate.set()
-    rejoined = await collect(agent.connect(agent_input("r2")))
+    assert first_id is not None
+    # The client already shows part of the first delta; the replay sends only the rest.
+    held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id=first_id, content="Hel")]
+    rejoined = await collect(agent.connect(agent_input("r2", held)))
     starts = [e for e in rejoined if isinstance(e, TextMessageStartEvent)]
     assert [s.message_id for s in starts] == [first_id]
-    assert text(rejoined) == "Hello again"
+    assert text(rejoined) == "lo again"
     assert rejoined[0].type.value == "RUN_STARTED" and rejoined[-1].type.value == "RUN_FINISHED"
 
     idle = await collect(agent.connect(agent_input("r3")))

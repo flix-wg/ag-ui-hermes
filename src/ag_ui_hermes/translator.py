@@ -67,6 +67,8 @@ class _Segment:
     id: str
     text: str = ""
     open: bool = False
+    announced: bool = False
+    """``TEXT_MESSAGE_START`` was sent in the current AG-UI run."""
     tool_calls: list[_ToolCall] = field(default_factory=list)
 
 
@@ -102,7 +104,9 @@ class HermesTranslator:
     """Turns one Hermes run's event stream into AG-UI events.
 
     Ids derive from the Hermes run id and each event's ``seq``, so feeding the same
-    events again (a replay from seq 0) yields identical ids. Call :meth:`start` once
+    events again (a replay from seq 0) yields identical ids. Messages passed to
+    :meth:`start` are what the client already holds: the replay skips them and sends
+    only text beyond what the client has. Call :meth:`start` once
     per AG-UI run, then :meth:`feed` every Hermes event; :meth:`finish` takes a
     ``GET /v1/runs/{id}`` status when the stream ended without a terminal event.
     """
@@ -129,6 +133,9 @@ class HermesTranslator:
         self.completed_tool: str | None = None
         """Raw name of the tool the last :meth:`feed` completed (for state refresh)."""
         self._prior: list[Message] = []
+        self._known_text: dict[str, str] = {}
+        self._known_calls: set[str] = set()
+        self._known_results: dict[str, str] = {}
         self._order: list[_Segment | _ToolCall | _Reasoning] = []
         self._segment: _Segment | None = None
         self._open_calls: list[_ToolCall] = []
@@ -145,13 +152,21 @@ class HermesTranslator:
         """Open an AG-UI run, re-announcing what is still open from earlier events."""
         self.thread_id, self.run_id = thread_id, run_id
         self._prior = list(messages)
+        self._known_text, self._known_calls, self._known_results = {}, set(), {}
+        for m in self._prior:
+            content = getattr(m, "content", None)
+            if isinstance(m, ToolMessage) and isinstance(content, str):
+                self._known_results[m.id] = content
+            elif isinstance(m, (AssistantMessage, ReasoningMessage)):
+                self._known_text[m.id] = content if isinstance(content, str) else ""
+                self._known_calls.update(c.id for c in getattr(m, "tool_calls", None) or ())
         self.suspended = False
         self.pending_interrupts.clear()
+        if self._segment is not None:
+            self._segment.announced = False
         events: list[BaseEvent] = [RunStartedEvent(thread_id=thread_id, run_id=run_id)]
         for sub in self._subagents.values():
             events.append(self._subagent_started(sub))
-        if self._segment is not None and self._segment.open:
-            events.append(TextMessageStartEvent(message_id=self._segment.id, role="assistant"))
         return events
 
     def feed(self, event: Mapping[str, Any]) -> list[BaseEvent]:
@@ -296,17 +311,40 @@ class HermesTranslator:
             events += self._close_text()
             seg = self._new_segment(f"{self.id_prefix}msg:{key}")
             seg.open = True
-            events.append(TextMessageStartEvent(message_id=seg.id, role="assistant"))
+        return events + self._append(seg, delta)
+
+    def _append(self, seg: _Segment, delta: str) -> list[BaseEvent]:
+        """Add ``delta`` to ``seg``, sending only what the client does not hold yet."""
         seg.text += delta
+        known = self._known_text.get(seg.id)
+        if known is not None:
+            if known.startswith(seg.text):
+                return []
+            if not seg.text.startswith(known):
+                return self._resync()
+            del self._known_text[seg.id]
+            delta = seg.text[len(known):]
+        events: list[BaseEvent] = []
+        if not seg.announced:
+            seg.announced = True
+            events.append(TextMessageStartEvent(message_id=seg.id, role="assistant"))
         events.append(TextMessageContentEvent(message_id=seg.id, delta=delta))
         return events
+
+    def _resync(self) -> list[BaseEvent]:
+        """The client's copy diverged from the run: replace it with a snapshot."""
+        self._known_text.clear()
+        self._known_results.clear()
+        ours = self.messages()
+        ids = {m.id for m in ours}
+        return [MessagesSnapshotEvent(messages=[m for m in self._prior if m.id not in ids] + ours)]
 
     def _close_text(self) -> list[BaseEvent]:
         seg = self._segment
         if seg is None or not seg.open:
             return []
         seg.open = False
-        return [TextMessageEndEvent(message_id=seg.id)]
+        return [TextMessageEndEvent(message_id=seg.id)] if seg.announced else []
 
     def _new_segment(self, message_id: str) -> _Segment:
         seg = _Segment(id=message_id)
@@ -324,19 +362,13 @@ class HermesTranslator:
         if streamed.strip() == output.strip():
             return []
         if final is not None and final.open and output.startswith(streamed):
-            final.text = output
-            suffix = output[len(streamed):]
-            return [TextMessageContentEvent(message_id=final.id, delta=suffix)]
+            return self._append(final, output[len(streamed):])
         known = {m.id for m in self.messages()}
         stale = [m for m in self._prior if m.id.startswith(self.id_prefix) and m.id not in known]
         if final is None and not stale:
             seg = self._new_segment(f"{self.id_prefix}final")
-            seg.text = output
-            return [
-                TextMessageStartEvent(message_id=seg.id, role="assistant"),
-                TextMessageContentEvent(message_id=seg.id, delta=output),
-                TextMessageEndEvent(message_id=seg.id),
-            ]
+            seg.open = True
+            return self._append(seg, output) + self._close_text()
         events = self._close_text()
         if final is None:
             final = self._new_segment(f"{self.id_prefix}final")
@@ -364,7 +396,7 @@ class HermesTranslator:
         seg = self._segment or self._new_segment(f"{self.id_prefix}msg:{key}")
         seg.tool_calls.append(call)
         self._open_calls.append(call)
-        if call.hidden or view is None:
+        if call.hidden or view is None or call.id in self._known_calls:
             return events
         metadata = {"preview": view[1]} if view[1] else None
         events.append(
@@ -393,6 +425,8 @@ class HermesTranslator:
             return events
         call.result, call.error = view[1], bool(event.get("error"))
         self._order.append(call)
+        if self._known_results.get(call.result_id) == call.result:
+            return events
         events.append(
             ToolCallResultEvent(
                 message_id=call.result_id, tool_call_id=call.id, content=call.result, role="tool",
@@ -415,6 +449,9 @@ class HermesTranslator:
         events = self._close_text()
         rid = f"{self.id_prefix}reasoning:{key}"
         self._order.append(_Reasoning(id=rid, text=text))
+        known = self._known_text.get(rid)
+        if known is not None:
+            return events + ([] if known == text else self._resync())
         return events + [
             ReasoningStartEvent(message_id=rid),
             ReasoningMessageStartEvent(message_id=rid, role="reasoning"),
