@@ -192,3 +192,30 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     assert isinstance(finished, RunFinishedEvent) and finished.outcome
     assert finished.outcome.type == "interrupt"
     assert (finished.outcome.interrupts[0].reason, finished.outcome.interrupts[0].tool_call_id) == ("confirmation", None)
+
+
+def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
+    def call(i: int) -> ToolCall:
+        return ToolCall(id=f"r:tool:{i}", function=FunctionCall(name="a", arguments="{}"))
+
+    def replay(held: list[Message], events: list[dict[str, Any]], start: int) -> list[tuple[str, Any]]:
+        t = HermesTranslator("r")
+        out = t.start("thread", "agui-run", held, replay=True)
+        for seq, event in enumerate(events, start=start):
+            out += t.feed({**event, "seq": seq})
+        return [(e.tool_call_id, e.content) for e in out if isinstance(e, ToolCallResultEvent)]
+
+    first = ToolMessage(id="r:tool:0:result", tool_call_id="r:tool:0", content="first")
+    # The backlog opens on A's completion; B starts later, inside the backlog.
+    later: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(3)]), first]
+    assert replay(later, [
+        {"event": "tool.completed", "tool": "a", "preview": "first"},
+        {"event": "tool.started", "tool": "a"},
+        {"event": "tool.completed", "tool": "a", "preview": "second"},
+    ], start=2) == [("r:tool:3", "second")]
+    # B started before the backlog: A's replayed completion is recognised by the result the client holds.
+    earlier: list[Message] = [later[0], AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(1)]), first]
+    assert replay(earlier, [
+        {"event": "tool.completed", "tool": "a", "preview": "first"},
+        {"event": "tool.completed", "tool": "a", "preview": "second"},
+    ], start=2) == [("r:tool:1", "second")]

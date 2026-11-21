@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -140,6 +141,9 @@ class HermesTranslator:
         self._known_text: dict[str, str] = {}
         self._known_calls: set[str] = set()
         self._known_results: dict[str, str] = {}
+        self._backlog_start = sys.maxsize
+        """First seq of a truncated backlog; calls with a lower seq had their start evicted."""
+        self._replayed_results: set[str] = set()
         self._reset_pending = False
         self._held_stale = False
         """A message the client holds has more or other text than it shows."""
@@ -203,6 +207,7 @@ class HermesTranslator:
         if not isinstance(seq, int) or seq <= self.last_seq:
             return False
         if self.last_seq < 0 and seq > 0:
+            self._backlog_start = seq
             self._truncate()
         self.last_seq = seq
         return True
@@ -494,18 +499,32 @@ class HermesTranslator:
         return events
 
     def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
-        """The oldest unfinished call the client holds for a completion whose start was evicted."""
+        """The oldest unfinished call the client holds for a completion whose start was evicted.
+
+        Only calls started before the backlog qualify. A completion repeating a result the
+        client holds is that call's replay and is dropped; it never lands on a later call.
+        """
         view = self._view(event)
-        finished = {m.tool_call_id for m in self._prior if isinstance(m, ToolMessage)}
-        finished |= {c.id for c in self._order if isinstance(c, _ToolCall)}
-        held = (
-            c for m in self._prior
-            if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix)
-            for c in m.tool_calls or ()
-            if view and c.function.name == view[0] and c.id not in finished
-        )
-        call = next(held, None)
-        return _ToolCall(call.id, str(event.get("tool") or "tool"), call.function.name, False) if call else None
+        if view is None:
+            return None
+        held_results = {m.tool_call_id: m.content for m in self._prior if isinstance(m, ToolMessage)}
+        done = {c.id for c in self._order if isinstance(c, _ToolCall)} | self._replayed_results
+        for m in self._prior:
+            if not isinstance(m, AssistantMessage) or not m.id.startswith(self.id_prefix):
+                continue
+            for c in m.tool_calls or ():
+                if c.function.name != view[0] or c.id in done or not self._evicted(c.id):
+                    continue
+                if c.id not in held_results:
+                    return _ToolCall(c.id, str(event.get("tool") or "tool"), c.function.name, False)
+                if held_results[c.id] == view[1]:
+                    self._replayed_results.add(c.id)
+                    return None
+        return None
+
+    def _evicted(self, call_id: str) -> bool:
+        key = call_id.removeprefix(f"{self.id_prefix}tool:")
+        return not key.isdigit() or int(key) < self._backlog_start
 
     def _open_visible_call(self, prefer: str | None = None) -> _ToolCall | None:
         visible = [c for c in self._open_calls if not c.hidden]
