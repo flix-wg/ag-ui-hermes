@@ -208,7 +208,6 @@ class HermesTranslator:
         self._known_results: dict[str, str] = {}
         self._backlog_start = sys.maxsize
         """First seq of a truncated backlog; calls with a lower seq had their start evicted."""
-        self._replayed_results: set[str] = set()
         self._reset_pending = False
         self._held_stale = False
         """A message the client holds has more or other text than it shows."""
@@ -575,29 +574,21 @@ class HermesTranslator:
     def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
         """The unfinished call the client holds for a completion whose start was evicted.
 
-        Only a lone unfinished call started before the backlog qualifies: the one with the
-        completion's id or, in a run without ids, the one of its tool. A completion repeating
-        a result the client holds is that call's replay and is dropped: a result is dropped
-        rather than put on a call it may not belong to.
+        Only a tool-call id can tell: the completion goes to the one unfinished call with its
+        id that started before the backlog. Without ids, or without exactly one such call, the
+        result is dropped rather than put on a call it may not belong to.
         """
-        view = self._view(event)
-        if view is None:
+        source = _source_id(event)
+        if source is None or not self._by_id():
             return None
-        name, result = view
-        source, by_id = _source_id(event), self._by_id()
+        held_results = {m.tool_call_id for m in self._prior if isinstance(m, ToolMessage)}
+        done = {c.id for c in self._order if isinstance(c, _ToolCall)}
 
         def owns(c: ToolCall) -> bool:
             seq, held_source = self._call_key(c.id)
-            evicted = seq is not None and seq < self._backlog_start
-            return evicted and (source is not None and held_source == source if by_id else c.function.name == name)
+            return seq is not None and seq < self._backlog_start and held_source == source
 
-        held_results = {m.tool_call_id: m.content for m in self._prior if isinstance(m, ToolMessage)}
-        done = {c.id for c in self._order if isinstance(c, _ToolCall)} | self._replayed_results
-        candidates = [c for c in self._held_calls() if c.id not in done and owns(c)]
-        if replayed := next((c for c in candidates if held_results.get(c.id) == result), None):
-            self._replayed_results.add(replayed.id)
-            return None
-        unfinished = [c for c in candidates if c.id not in held_results]
+        unfinished = [c for c in self._held_calls() if c.id not in done and c.id not in held_results and owns(c)]
         if len(unfinished) != 1:
             return None
         return _ToolCall(unfinished[0].id, str(event.get("tool") or "tool"), unfinished[0].function.name, False)

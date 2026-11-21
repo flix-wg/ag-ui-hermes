@@ -227,12 +227,10 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     assert [m.id for m in snapshots[0].messages] == ["u1", "r:msg:0", "r:tool:0:result", "r:final"]
     assert snapshots[0].messages[-1].content == "Hello world"
 
-    # A completion whose start was evicted belongs to the call the client holds, never a new one.
+    # Without ids, a completion whose start was evicted could belong to any held call of its tool.
     tools = HermesTranslator("r")
     tools.start("thread", "agui-run", held[:2], replay=True)
-    completed = tools.feed({"event": "tool.completed", "tool": "a", "preview": "done", "seq": 5})
-    completed += tools.feed({"event": "tool.completed", "tool": "a", "preview": "again", "seq": 6})
-    assert [(type(e).__name__, getattr(e, "tool_call_id", None)) for e in completed] == [("ToolCallResultEvent", "r:tool:0")]
+    assert tools.feed({"event": "tool.completed", "tool": "a", "preview": "done", "seq": 5}) == []
 
     # Stale held text is replaced even when the fresh final segment already equals the output.
     stale = HermesTranslator("r")
@@ -284,16 +282,9 @@ def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
         ],
         start=2,
     ) == [("r:tool:3", "second")]
-    # B started before the backlog: A's replayed completion is recognised by the result the client holds.
+    # B started before the backlog: without ids its completion cannot be told from A's.
     earlier: list[Message] = [later[0], AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(1)]), first]
-    assert replay(
-        earlier,
-        [
-            {"event": "tool.completed", "tool": "a", "preview": "first"},
-            {"event": "tool.completed", "tool": "a", "preview": "second"},
-        ],
-        start=2,
-    ) == [("r:tool:1", "second")]
+    assert replay(earlier, [{"event": "tool.completed", "tool": "a", "preview": "second"}], start=2) == []
 
 
 def test_completions_pair_with_their_start_by_id() -> None:
@@ -327,7 +318,8 @@ def test_evicted_completions_pair_by_id_and_never_by_guess() -> None:
         ("r:tool:1:id:c2", "two"),
         ("r:tool:0:id:c1", "one"),
     ]
-    assert results([{}, {}], [{"preview": "two"}]) == []  # without ids either call could own it
+    assert results([{"id": "c1"}, {"id": "c2"}], [{"id": "c1", "preview": "one"}, {"id": "c1", "preview": "again"}]) == [("r:tool:0:id:c1", "one")]
+    assert results([{}], [{"preview": "one"}]) == []  # without ids nothing ties the completion to the call
 
 
 def secret(tool: str, preview: str, _event: object) -> tuple[str, str] | None:
@@ -351,6 +343,17 @@ def secret(tool: str, preview: str, _event: object) -> tuple[str, str] | None:
             ],
             3,
             2,
+        ),
+        # The visible call's result and the start of a later hidden call of the same tool were evicted.
+        (
+            [
+                {"event": "tool.started"},
+                {"event": "tool.completed", "preview": "one"},
+                {"event": "tool.started", "preview": "secret"},
+                {"event": "tool.completed", "preview": "hidden"},
+            ],
+            1,
+            3,
         ),
     ],
 )
