@@ -57,13 +57,26 @@ CustomEventMapper = Callable[[Mapping[str, Any]], "Sequence[BaseEvent] | None"]
 """Maps an event the translator does not know; ``None`` falls through to the default."""
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
-_IGNORED = frozenset(
-    {"approval.responded", "run.waiting_for_approval", "run.steered", "run.stopping"}
-)
+_IGNORED = frozenset({"approval.responded", "run.waiting_for_approval", "run.steered", "run.stopping"})
 _SUBAGENT_KEYS = (
-    "goal", "task_count", "task_index", "subagent_id", "child_session_id", "delegation_id",
-    "parent_id", "depth", "model", "tool_count", "status", "summary", "duration_seconds",
-    "input_tokens", "output_tokens", "reasoning_tokens", "api_calls", "cost_usd",
+    "goal",
+    "task_count",
+    "task_index",
+    "subagent_id",
+    "child_session_id",
+    "delegation_id",
+    "parent_id",
+    "depth",
+    "model",
+    "tool_count",
+    "status",
+    "summary",
+    "duration_seconds",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "api_calls",
+    "cost_usd",
 )
 _APPROVAL_KEYS = ("command", "description", "pattern_key", "pattern_keys", "choices", "smart_denied")
 _MAX_COUNT = 2**53 - 1
@@ -121,6 +134,8 @@ class _ToolCall:
     hidden: bool
     result: str | None = None
     error: bool = False
+    source_id: str | None = None
+    """The event's own ``tool_call_id``/``id``, which pairs a completion with its start."""
 
     @property
     def result_id(self) -> str:
@@ -207,9 +222,7 @@ class HermesTranslator:
     def id_prefix(self) -> str:
         return f"{self.hermes_run_id}:"
 
-    def start(
-        self, thread_id: str, run_id: str, messages: Iterable[Message] = (), *, replay: bool = False
-    ) -> list[BaseEvent]:
+    def start(self, thread_id: str, run_id: str, messages: Iterable[Message] = (), *, replay: bool = False) -> list[BaseEvent]:
         """Open an AG-UI run, re-announcing what is still open from earlier events.
 
         ``replay`` marks a rejoin that feeds the run from the start of its backlog.
@@ -336,9 +349,7 @@ class HermesTranslator:
             RunFinishedEvent(
                 thread_id=self.thread_id,
                 run_id=self.run_id,
-                outcome=RunFinishedInterruptOutcome(
-                    interrupts=list(self.pending_interrupts.values())
-                ),
+                outcome=RunFinishedInterruptOutcome(interrupts=list(self.pending_interrupts.values())),
             )
         )
         self.suspended = True
@@ -355,11 +366,7 @@ class HermesTranslator:
             events += self._fix_up(status.get("output"))
         events += self._close_text()
         for sub in self._subagents.values():
-            events.append(
-                SubagentErrorEvent(
-                    subagent_run_id=sub.id, message=f"Run {state} before the subagent finished"
-                )
-            )
+            events.append(SubagentErrorEvent(subagent_run_id=sub.id, message=f"Run {state} before the subagent finished"))
         self._subagents.clear()
         usage = token_usage(status)
         if state == "completed":
@@ -369,9 +376,7 @@ class HermesTranslator:
         else:
             events.append(RunErrorEvent(message=f"The Hermes run {state}.", code=state, usage=usage))
             return events
-        events.append(
-            RunFinishedEvent(thread_id=self.thread_id, run_id=self.run_id, outcome=outcome, usage=usage)
-        )
+        events.append(RunFinishedEvent(thread_id=self.thread_id, run_id=self.run_id, outcome=outcome, usage=usage))
         return events
 
     def messages(self) -> list[Message]:
@@ -379,15 +384,9 @@ class HermesTranslator:
         out: list[Message] = []
         for item in self._order:
             if isinstance(item, _Segment):
-                calls = [
-                    ToolCall(id=c.id, function=FunctionCall(name=c.name, arguments="{}"))
-                    for c in item.tool_calls
-                    if not c.hidden
-                ]
+                calls = [ToolCall(id=c.id, function=FunctionCall(name=c.name, arguments="{}")) for c in item.tool_calls if not c.hidden]
                 if item.text or calls:
-                    out.append(
-                        AssistantMessage(id=item.id, content=item.text or None, tool_calls=calls or None)
-                    )
+                    out.append(AssistantMessage(id=item.id, content=item.text or None, tool_calls=calls or None))
             elif isinstance(item, _ToolCall):
                 out.append(
                     ToolMessage(
@@ -457,14 +456,10 @@ class HermesTranslator:
         if streamed.strip() == output.strip() and not self._held_stale:
             return []
         if final is not None and final.open and not held and not self._held_stale and output.startswith(streamed):
-            return self._append(final, output[len(streamed):])
+            return self._append(final, output[len(streamed) :])
         known = {m.id for m in self.messages()}
         # Text the replay could not rebuild (its start was evicted) is replaced by the output.
-        stale = [
-            m for m in self._prior
-            if m.id.startswith(self.id_prefix) and m.id not in known
-            and isinstance(m, AssistantMessage) and not m.tool_calls
-        ]
+        stale = [m for m in self._prior if m.id.startswith(self.id_prefix) and m.id not in known and isinstance(m, AssistantMessage) and not m.tool_calls]
         if final is None and not stale and not self._held_stale:
             seg = self._new_segment(f"{self.id_prefix}final")
             seg.open = True
@@ -501,8 +496,11 @@ class HermesTranslator:
         view = self._view(event)
         raw = str(event.get("tool") or "tool")
         call = _ToolCall(
-            id=f"{self.id_prefix}tool:{key}", raw_name=raw, name=view[0] if view else raw,
+            id=f"{self.id_prefix}tool:{key}",
+            raw_name=raw,
+            name=view[0] if view else raw,
             hidden=view is None,
+            source_id=_source_id(event),
         )
         seg = self._segment or self._new_segment(f"{self.id_prefix}msg:{key}")
         seg.tool_calls.append(call)
@@ -512,7 +510,9 @@ class HermesTranslator:
         metadata = {"preview": view[1]} if view[1] else None
         events.append(
             ToolCallStartEvent(
-                tool_call_id=call.id, tool_call_name=call.name, parent_message_id=seg.id,
+                tool_call_id=call.id,
+                tool_call_name=call.name,
+                parent_message_id=seg.id,
                 metadata=metadata,
             )
         )
@@ -522,7 +522,9 @@ class HermesTranslator:
     def _tool_completed(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         raw = str(event.get("tool") or "tool")
         self.completed_tool = raw
-        call = next((c for c in self._open_calls if c.raw_name == raw), None)
+        source = _source_id(event)
+        call = next((c for c in self._open_calls if source is not None and c.source_id == source), None)
+        call = call or next((c for c in self._open_calls if c.raw_name == raw and (source is None or c.source_id is None)), None)
         events: list[BaseEvent] = []
         if call is None and self.truncated:
             call = self._held_call(event)
@@ -545,7 +547,10 @@ class HermesTranslator:
             return events
         events.append(
             ToolCallResultEvent(
-                message_id=call.result_id, tool_call_id=call.id, content=call.result, role="tool",
+                message_id=call.result_id,
+                tool_call_id=call.id,
+                content=call.result,
+                role="tool",
                 metadata={"error": call.error, "duration": event.get("duration")},
             )
         )
@@ -616,8 +621,11 @@ class HermesTranslator:
 
     def _subagent_started(self, sub: _Subagent) -> SubagentStartedEvent:
         return SubagentStartedEvent(
-            subagent_run_id=sub.id, name="subagent", description=sub.description,
-            parent_tool_call_id=sub.parent_tool_call_id, metadata=sub.metadata or None,
+            subagent_run_id=sub.id,
+            name="subagent",
+            description=sub.description,
+            parent_tool_call_id=sub.parent_tool_call_id,
+            metadata=sub.metadata or None,
         )
 
     def _subagent_start(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
@@ -647,13 +655,17 @@ class HermesTranslator:
         if status == "completed":
             return [
                 SubagentFinishedEvent(
-                    subagent_run_id=sub.id, result=summary,
-                    outcome=SubagentFinishedSuccessOutcome(), metadata=metadata or None,
+                    subagent_run_id=sub.id,
+                    result=summary,
+                    outcome=SubagentFinishedSuccessOutcome(),
+                    metadata=metadata or None,
                 )
             ]
         return [
             SubagentErrorEvent(
-                subagent_run_id=sub.id, message=str(summary or f"Subagent {status}"), code=status,
+                subagent_run_id=sub.id,
+                message=str(summary or f"Subagent {status}"),
+                code=status,
                 metadata=metadata or None,
             )
         ]
@@ -714,3 +726,8 @@ class HermesTranslator:
         sent = sent if isinstance(sent, (int, float)) and not isinstance(sent, bool) else time.time()
         expires = datetime.fromtimestamp(sent + self.approval_timeout, UTC)
         return expires.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _source_id(event: Mapping[str, Any]) -> str | None:
+    value = event.get("tool_call_id") or event.get("id")
+    return str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) else None

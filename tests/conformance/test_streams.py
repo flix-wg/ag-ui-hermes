@@ -40,8 +40,10 @@ def verify(stream: list[dict[str, Any]]) -> None:
     subagents: set[str] = set()
     opens = {"TEXT_MESSAGE_START": text, "TOOL_CALL_START": tools, "REASONING_MESSAGE_START": reasoning}
     needs = {
-        "TEXT_MESSAGE_CONTENT": (text, "text message"), "TEXT_MESSAGE_END": (text, "text message"),
-        "TOOL_CALL_ARGS": (tools, "tool call"), "TOOL_CALL_END": (tools, "tool call"),
+        "TEXT_MESSAGE_CONTENT": (text, "text message"),
+        "TEXT_MESSAGE_END": (text, "text message"),
+        "TOOL_CALL_ARGS": (tools, "tool call"),
+        "TOOL_CALL_END": (tools, "tool call"),
         "REASONING_MESSAGE_CONTENT": (reasoning, "reasoning message"),
         "REASONING_MESSAGE_END": (reasoning, "reasoning message"),
     }
@@ -81,7 +83,9 @@ def verify(stream: list[dict[str, Any]]) -> None:
             subagents.discard(event["subagentRunId"])
         elif kind == "RUN_FINISHED":
             for name, active in (
-                ("text messages", text), ("tool calls", tools), ("reasoning messages", reasoning),
+                ("text messages", text),
+                ("tool calls", tools),
+                ("reasoning messages", reasoning),
                 ("subagents", subagents),
             ):
                 if active:
@@ -125,8 +129,9 @@ def _extras(value: Any) -> bool:
     return False
 
 
-def feed(t: HermesTranslator, run_id: str, events: list[dict[str, Any]], start: int = 0,
-         held: list[Message] | None = None, *, replay: bool = False) -> list[BaseEvent]:
+def feed(
+    t: HermesTranslator, run_id: str, events: list[dict[str, Any]], start: int = 0, held: list[Message] | None = None, *, replay: bool = False
+) -> list[BaseEvent]:
     out = t.start("thread", run_id, held or [UserMessage(id="u1", content="Hi")], replay=replay)
     for seq, event in enumerate(events, start=start):
         out += t.feed({**event, "seq": seq})
@@ -155,16 +160,21 @@ def test_translator_output_conforms() -> None:
     streams.append(feed(suspended, "a2", head) + feed(suspended, "a3", tail, start=len(head)))
     owned = [e for e in streams[-1] if isinstance(e, SubagentFinishedEvent) and e.outcome]
     assert [e.outcome.model_dump(exclude_none=True) for e in owned if e.outcome] == [
-        {"type": "suspended", "interrupt_ids": ["q1"]}, {"type": "success"},
+        {"type": "suspended", "interrupt_ids": ["q1"]},
+        {"type": "success"},
     ]
 
     streams += [
-        feed(HermesTranslator("r3"), "a4", [
-            {"event": "message.delta", "delta": "Half"},
-            {"event": "subagent.start", "subagent_id": "s1"},
-            {"event": "reasoning.available", "text": "hmm"},
-            {"event": f"run.{status}", "error": "boom"},
-        ])
+        feed(
+            HermesTranslator("r3"),
+            "a4",
+            [
+                {"event": "message.delta", "delta": "Half"},
+                {"event": "subagent.start", "subagent_id": "s1"},
+                {"event": "reasoning.available", "text": "hmm"},
+                {"event": f"run.{status}", "error": "boom"},
+            ],
+        )
         for status in ("failed", "cancelled")
     ]
 
@@ -175,11 +185,20 @@ def test_translator_output_conforms() -> None:
         AssistantMessage(id="r4:msg:0", tool_calls=[call]),
         AssistantMessage(id="r4:msg:2", content="Hel"),
     ]
-    streams.append(feed(HermesTranslator("r4"), "a5", [
-        {"event": "tool.completed", "tool": "a", "preview": "ok"},
-        {"event": "message.delta", "delta": "lo"},
-        {"event": "run.completed", "output": "Hello"},
-    ], start=3, held=held, replay=True))
+    streams.append(
+        feed(
+            HermesTranslator("r4"),
+            "a5",
+            [
+                {"event": "tool.completed", "tool": "a", "preview": "ok"},
+                {"event": "message.delta", "delta": "lo"},
+                {"event": "run.completed", "output": "Hello"},
+            ],
+            start=3,
+            held=held,
+            replay=True,
+        )
+    )
 
     declared = fixture("current-peer-declares-protocol-version")["stream"][0]
     for stream in streams:

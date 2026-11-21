@@ -19,9 +19,14 @@ class FakeRun:
     def __init__(self, run_id: str, session_id: str) -> None:
         self.run_id = run_id
         self.status: dict[str, Any] = {
-            "object": "hermes.run", "run_id": run_id, "status": "running", "session_id": session_id,
+            "object": "hermes.run",
+            "run_id": run_id,
+            "status": "running",
+            "session_id": session_id,
         }
         self.backlog: list[dict[str, Any]] = []
+        self.evicted = 0
+        """Seqs below this fell out of the replay backlog."""
         self.closed = False
         self.changed = asyncio.Condition()
         self.answered = asyncio.Event()
@@ -61,9 +66,10 @@ class FakeRun:
 
     async def sse(self, last_seq: int, drop_after: int | None) -> AsyncIterator[bytes]:
         yield b": open\n\n"
-        next_seq = last_seq + 1
+        next_seq = max(last_seq + 1, self.evicted)
         while True:
             async with self.changed:
+
                 def ready(n: int = next_seq) -> bool:
                     return len(self.backlog) > n or self.closed
 
@@ -117,8 +123,7 @@ class FakeHermes:
             return httpx.Response(202, json={"run_id": run_id, "status": "started", "replayed": False})
         if path == "/v1/capabilities":
             features = {"run_events_sse": True, "approval_events": True, "reasoning_streaming": True}
-            return httpx.Response(200, json={"object": "hermes.api_server.capabilities", "model": "hermes-agent",
-                                             "features": features})
+            return httpx.Response(200, json={"object": "hermes.api_server.capabilities", "model": "hermes-agent", "features": features})
         session = re.fullmatch(r"/api/sessions/([^/]+)/messages", path)
         if session:
             rows = self.sessions.get(session.group(1))
@@ -136,14 +141,13 @@ class FakeHermes:
             last_seq = int(request.headers.get("last-event-id", "-1"))
             self.event_cursors.append(last_seq)
             drop, self.drop_once_after = self.drop_once_after, None
-            return httpx.Response(
-                200, headers={"content-type": "text/event-stream"}, stream=_Stream(run.sse(last_seq, drop))
-            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_Stream(run.sse(last_seq, drop)))
         if action == "/stop":
             assert run.task is not None
             run.task.cancel()
             return httpx.Response(200, json={"run_id": run.run_id, "status": "stopping"})
-        if run.status["status"] != "waiting_for_approval":
+        pending = run.status.get("approval", {}).get("request_id")
+        if run.status["status"] != "waiting_for_approval" or body.get("request_id") not in (None, pending):
             return self._error(409, "approval_not_pending")
         run.status["status"] = "running"
         run.status.pop("approval", None)

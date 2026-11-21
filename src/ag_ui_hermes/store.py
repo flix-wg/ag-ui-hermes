@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import copy
+import logging
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+logger = logging.getLogger("ag_ui_hermes")
 
 
 @dataclass
@@ -57,8 +60,10 @@ class ThreadStore(Protocol):
 class InMemoryThreadStore:
     """Process-local store; use a shared implementation when running several workers.
 
-    Keeps at most ``max_threads`` records and evicts the least recently used idle thread
-    (one without a Hermes run) first.
+    Keeps about ``max_threads`` records by evicting the least recently used idle threads
+    (those without a Hermes run). A thread with a live run is never evicted, since its run
+    would lose its stop and approval mapping; when every record is live the store grows past
+    ``max_threads`` and logs a warning. Hermes bounds how many runs are live at once.
     """
 
     def __init__(self, max_threads: int = 10_000) -> None:
@@ -66,6 +71,7 @@ class InMemoryThreadStore:
             raise ValueError("max_threads must be at least 1")
         self.max_threads = max_threads
         self._records: OrderedDict[str, ThreadRecord] = OrderedDict()
+        self._over = False
 
     async def get(self, thread_id: str) -> ThreadRecord | None:
         record = self._records.get(thread_id)
@@ -82,7 +88,13 @@ class InMemoryThreadStore:
         stored.version = current.version + 1
         self._records[thread_id] = stored
         self._records.move_to_end(thread_id)
-        while len(self._records) > self.max_threads:
-            idle = next((k for k, r in self._records.items() if r.run_id is None and k != thread_id), None)
-            del self._records[idle if idle is not None else next(iter(self._records))]
+        excess = len(self._records) - self.max_threads
+        if excess > 0:
+            idle = [k for k, r in self._records.items() if r.run_id is None and k != thread_id][:excess]
+            for key in idle:
+                del self._records[key]
+        over = len(self._records) > self.max_threads
+        if over and not self._over:
+            logger.warning("InMemoryThreadStore holds %d threads with live runs, more than max_threads=%d", len(self._records), self.max_threads)
+        self._over = over
         return True

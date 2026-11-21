@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from ag_ui.core import RunErrorEvent
+from ag_ui.core import RunErrorEvent, UserMessage
 
 from ag_ui_hermes import HermesAgent, HermesRunsClient, HookContext, InMemoryThreadStore, ThreadRecord
 
@@ -12,6 +12,8 @@ from .fake_hermes import FakeHermes
 from .test_agent import agent_input, collect, make_agent
 
 SECRET = "hermes.internal:8642"
+TOKEN = "sk-test-5f1d0c"
+PROMPT = "my private prompt"
 
 
 def unreachable(request: httpx.Request) -> httpx.Response:
@@ -41,10 +43,9 @@ async def test_run_error_hides_the_cause_and_the_log_keeps_it(
 
     errors: list[tuple[HookContext, Exception]] = []
     http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-    agent = HermesAgent(HermesRunsClient(f"http://{SECRET}", "secret", http=http),
-                        on_error=lambda ctx, exc: errors.append((ctx, exc)))
-    with caplog.at_level(logging.WARNING, logger="ag_ui_hermes"):
-        events = await collect(agent.run(agent_input()))
+    agent = HermesAgent(HermesRunsClient(f"http://{SECRET}", TOKEN, http=http), on_error=lambda ctx, exc: errors.append((ctx, exc)))
+    with caplog.at_level(logging.DEBUG, logger="ag_ui_hermes"):
+        events = await collect(agent.run(agent_input(messages=[UserMessage(id="u1", content=PROMPT)])))
 
     assert [e.type.value for e in events] == ["RUN_STARTED", "RUN_ERROR"]
     error = events[-1]
@@ -55,8 +56,12 @@ async def test_run_error_hides_the_cause_and_the_log_keeps_it(
     [(ctx, exc)] = errors
     assert ctx.action == "run"
     assert ctx.thread_id == "t1"
-    assert str(exc) in caplog.text
-    assert code in caplog.text
+    [logged] = [r for r in caplog.records if r.exc_info]
+    assert logged.exc_info
+    assert logged.exc_info[1] is exc
+    assert code in logged.getMessage()
+    assert TOKEN not in caplog.text  # the adapter logs no credentials, headers or request bodies
+    assert PROMPT not in caplog.text
 
 
 class BrokenStore(InMemoryThreadStore):
@@ -71,10 +76,9 @@ class BrokenStore(InMemoryThreadStore):
 
 
 @pytest.mark.parametrize(("refuse", "code"), [(False, "internal_error"), (True, "store_conflict")])
-async def test_store_failures_end_the_stream_with_run_error(
-    refuse: bool, code: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    agent = make_agent(FakeHermes([asyncio.Event()]))
+async def test_store_failures_end_the_stream_with_run_error(refuse: bool, code: str, caplog: pytest.LogCaptureFixture) -> None:
+    fake = FakeHermes([asyncio.Event()])
+    agent = make_agent(fake)
     agent.store = BrokenStore(refuse)
     with caplog.at_level(logging.WARNING, logger="ag_ui_hermes"):
         events = await asyncio.wait_for(collect(agent.run(agent_input())), 2)
@@ -83,10 +87,11 @@ async def test_store_failures_end_the_stream_with_run_error(
     assert isinstance(error, RunErrorEvent)
     assert error.code == code
     assert "hunter2" not in error.model_dump_json()
-    assert ("hunter2" in caplog.text) is not refuse
+    assert code in caplog.text
+    assert any(path == "/v1/runs/run_1/stop" for _, path, _ in fake.calls)  # the unrecorded run is not left behind
 
 
-async def test_thread_records_round_trip_and_the_memory_store_is_bounded() -> None:
+async def test_thread_records_round_trip_and_the_memory_store_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
     record = ThreadRecord(session_id="s", run_id="run_1", agui_run_ids=["r1"], started={"r1": "run_1"}, version=3)
     data = record.to_dict()
     assert data["schema_version"] == 1
@@ -100,3 +105,8 @@ async def test_thread_records_round_trip_and_the_memory_store_is_bounded() -> No
         await store.put_if_run(thread, ThreadRecord(), None)
     assert await store.get("idle") is None
     assert await store.get("busy") is not None
+    with caplog.at_level(logging.WARNING, logger="ag_ui_hermes"):
+        for thread in ("busy2", "busy3"):  # only idle threads are evicted, so live runs grow past the cap
+            await store.put_if_run(thread, ThreadRecord(run_id=thread), None)
+    assert [await store.get(t) is not None for t in ("busy", "newer", "busy2", "busy3")] == [True, False, True, True]
+    assert "max_threads" in caplog.text

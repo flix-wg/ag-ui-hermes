@@ -40,10 +40,13 @@ RUN: list[dict[str, Any]] = [
     {"event": "tool.completed", "tool": "light.turn_on", "duration": 0.3, "error": True, "preview": "hall offline"},
     {"event": "dashboard.scene", "value": 1},
     {"event": "message.delta", "delta": "Kitchen is on."},
-    {"event": "run.completed", "output": "Kitchen is on.", "completed": True,
-     "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150, "cache_read_tokens": 100,
-               "cache_write_tokens": 0},
-     "runtime": {"provider": "openrouter", "model": "glm-5", "route_source": "global"}},
+    {
+        "event": "run.completed",
+        "output": "Kitchen is on.",
+        "completed": True,
+        "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150, "cache_read_tokens": 100, "cache_write_tokens": 0},
+        "runtime": {"provider": "openrouter", "model": "glm-5", "route_source": "global"},
+    },
 ]
 
 
@@ -56,21 +59,31 @@ def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:
 
     assert [e.type.value for e in events] == [
         "RUN_STARTED",
-        "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END",
-        "TOOL_CALL_START", "TOOL_CALL_END", "TOOL_CALL_START", "TOOL_CALL_END",
-        "REASONING_START", "REASONING_MESSAGE_START", "REASONING_MESSAGE_CONTENT",
-        "REASONING_MESSAGE_END", "REASONING_END",
-        "TOOL_CALL_RESULT", "TOOL_CALL_RESULT",
-        "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "TOOL_CALL_START",
+        "TOOL_CALL_END",
+        "TOOL_CALL_START",
+        "TOOL_CALL_END",
+        "REASONING_START",
+        "REASONING_MESSAGE_START",
+        "REASONING_MESSAGE_CONTENT",
+        "REASONING_MESSAGE_END",
+        "REASONING_END",
+        "TOOL_CALL_RESULT",
+        "TOOL_CALL_RESULT",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
         "RUN_FINISHED",
     ]
     starts = [e for e in events if isinstance(e, ToolCallStartEvent)]
     results = [e for e in events if isinstance(e, ToolCallResultEvent)]
     # Hermes sends no tool-call ids: completions pair FIFO per tool name.
     assert [r.tool_call_id for r in results] == [s.tool_call_id for s in starts]
-    assert [(r.content, r.metadata and r.metadata["error"]) for r in results] == [
-        ("kitchen on", False), ("hall offline", True)
-    ]
+    assert [(r.content, r.metadata and r.metadata["error"]) for r in results] == [("kitchen on", False), ("hall offline", True)]
     assert starts[0].parent_message_id == "run_1:msg:0"
     finished = events[-1]
     assert isinstance(finished, RunFinishedEvent)
@@ -79,8 +92,12 @@ def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:
     assert events[0].model_dump(by_alias=True, exclude_none=True)["protocolVersion"] == "1.0"
     assert finished.usage
     assert finished.usage[0].model_dump(by_alias=True, exclude_none=True) == {
-        "provider": "openrouter", "model": "glm-5", "inputTokens": 120, "outputTokens": 30,
-        "totalTokens": 150, "cachedInputTokens": 100,
+        "provider": "openrouter",
+        "model": "glm-5",
+        "inputTokens": 120,
+        "outputTokens": 30,
+        "totalTokens": 150,
+        "cachedInputTokens": 100,
     }
 
     replayed = feed_all(HermesTranslator("run_1", tool_filter=hide_secrets), RUN)
@@ -89,31 +106,41 @@ def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:
     passthrough = feed_all(HermesTranslator("run_1", passthrough_unknown=True, raw_unknown=True), RUN)
     unknown = [e for e in passthrough if isinstance(e, (RawEvent, CustomEvent))]
     assert [(e.type.value, e.event if isinstance(e, RawEvent) else e.name) for e in unknown] == [
-        ("RAW", {"event": "dashboard.scene", "value": 1, "seq": 9}), ("CUSTOM", "hermes.dashboard.scene")
+        ("RAW", {"event": "dashboard.scene", "value": 1, "seq": 9}),
+        ("CUSTOM", "hermes.dashboard.scene"),
     ]
     assert isinstance(unknown[0], RawEvent)
     assert unknown[0].source == "hermes"
 
 
 def test_canonical_output_fixes_streamed_text() -> None:
-    suffix = feed_all(HermesTranslator("r"), [
-        {"event": "message.delta", "delta": "Hel"},
-        {"event": "run.completed", "output": "Hello"},
-    ])
+    suffix = feed_all(
+        HermesTranslator("r"),
+        [
+            {"event": "message.delta", "delta": "Hel"},
+            {"event": "run.completed", "output": "Hello"},
+        ],
+    )
     assert [e.delta for e in suffix if isinstance(e, TextMessageContentEvent)] == ["Hel", "lo"]
 
-    unstreamed = feed_all(HermesTranslator("r"), [
-        {"event": "tool.started", "tool": "t"},
-        {"event": "tool.completed", "tool": "t", "preview": "x"},
-        {"event": "run.completed", "output": "Answer"},
-    ])
+    unstreamed = feed_all(
+        HermesTranslator("r"),
+        [
+            {"event": "tool.started", "tool": "t"},
+            {"event": "tool.completed", "tool": "t", "preview": "x"},
+            {"event": "run.completed", "output": "Answer"},
+        ],
+    )
     final = [e for e in unstreamed if isinstance(e, TextMessageContentEvent)]
     assert [(e.message_id, e.delta) for e in final] == [("r:final", "Answer")]
 
-    rewritten = feed_all(HermesTranslator("r"), [
-        {"event": "message.delta", "delta": "Draft answer"},
-        {"event": "run.completed", "output": "Final answer"},
-    ])
+    rewritten = feed_all(
+        HermesTranslator("r"),
+        [
+            {"event": "message.delta", "delta": "Draft answer"},
+            {"event": "run.completed", "output": "Final answer"},
+        ],
+    )
     snapshot = next(e for e in rewritten if isinstance(e, MessagesSnapshotEvent))
     assert [m.id for m in snapshot.messages] == ["u1", "r:msg:0"]
     assert isinstance(snapshot.messages[1], AssistantMessage)
@@ -123,13 +150,21 @@ def test_canonical_output_fixes_streamed_text() -> None:
 
 def test_approval_binds_a_tool_call_only_when_unambiguous() -> None:
     t = HermesTranslator("r", tool_filter=hide_secrets, approval_choices={"once"}, approval_timeout=300)
-    events = feed_all(t, [
-        {"event": "tool.started", "tool": "terminal", "preview": "ls"},
-        {"event": "tool.started", "tool": "secret_lookup", "preview": "token"},
-        {"event": "approval.request", "request_id": "q1", "command": "cat ~/.ssh/id_rsa",
-         "description": "read a private key", "choices": ["once", "session", "always", "deny"],
-         "timestamp": 1795000000.25},
-    ])
+    events = feed_all(
+        t,
+        [
+            {"event": "tool.started", "tool": "terminal", "preview": "ls"},
+            {"event": "tool.started", "tool": "secret_lookup", "preview": "token"},
+            {
+                "event": "approval.request",
+                "request_id": "q1",
+                "command": "cat ~/.ssh/id_rsa",
+                "description": "read a private key",
+                "choices": ["once", "session", "always", "deny"],
+                "timestamp": 1795000000.25,
+            },
+        ],
+    )
     finished = events[-1]
     assert isinstance(finished, RunFinishedEvent)
     assert finished.outcome
@@ -175,11 +210,14 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
         AssistantMessage(id="r:msg:2", content="Hel"),
     ]
     events = t.start("thread", "agui-run", held, replay=True)
-    for seq, event in enumerate([
-        {"event": "message.delta", "delta": "lo wor"},  # the segment opened at seq 2, now evicted
-        {"event": "message.delta", "delta": "ld"},
-        {"event": "run.completed", "output": "Hello world"},
-    ], start=5):
+    for seq, event in enumerate(
+        [
+            {"event": "message.delta", "delta": "lo wor"},  # the segment opened at seq 2, now evicted
+            {"event": "message.delta", "delta": "ld"},
+            {"event": "run.completed", "output": "Hello world"},
+        ],
+        start=5,
+    ):
         events += t.feed({**event, "seq": seq})
 
     assert not [e for e in events if isinstance(e, TextMessageContentEvent)]
@@ -193,18 +231,19 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     tools.start("thread", "agui-run", held[:2], replay=True)
     completed = tools.feed({"event": "tool.completed", "tool": "a", "preview": "done", "seq": 5})
     completed += tools.feed({"event": "tool.completed", "tool": "a", "preview": "again", "seq": 6})
-    assert [(type(e).__name__, getattr(e, "tool_call_id", None)) for e in completed] == [
-        ("ToolCallResultEvent", "r:tool:0")
-    ]
+    assert [(type(e).__name__, getattr(e, "tool_call_id", None)) for e in completed] == [("ToolCallResultEvent", "r:tool:0")]
 
     # Stale held text is replaced even when the fresh final segment already equals the output.
     stale = HermesTranslator("r")
     out = stale.start("thread", "agui-run", [held[0], ReasoningMessage(id="r:reasoning:5", content="old")], replay=True)
-    for seq, event in enumerate([
-        {"event": "reasoning.available", "text": "new"},
-        {"event": "message.delta", "delta": "Hello"},
-        {"event": "run.completed", "output": "Hello"},
-    ], start=5):
+    for seq, event in enumerate(
+        [
+            {"event": "reasoning.available", "text": "new"},
+            {"event": "message.delta", "delta": "Hello"},
+            {"event": "run.completed", "output": "Hello"},
+        ],
+        start=5,
+    ):
         out += stale.feed({**event, "seq": seq})
     assert [e.delta for e in out if isinstance(e, TextMessageContentEvent)] == ["Hello"]
     fixed = next(e for e in out if isinstance(e, MessagesSnapshotEvent))
@@ -235,14 +274,37 @@ def test_evicted_completion_never_lands_on_a_call_it_does_not_own() -> None:
     first = ToolMessage(id="r:tool:0:result", tool_call_id="r:tool:0", content="first")
     # The backlog opens on A's completion; B starts later, inside the backlog.
     later: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(3)]), first]
-    assert replay(later, [
-        {"event": "tool.completed", "tool": "a", "preview": "first"},
-        {"event": "tool.started", "tool": "a"},
-        {"event": "tool.completed", "tool": "a", "preview": "second"},
-    ], start=2) == [("r:tool:3", "second")]
+    assert replay(
+        later,
+        [
+            {"event": "tool.completed", "tool": "a", "preview": "first"},
+            {"event": "tool.started", "tool": "a"},
+            {"event": "tool.completed", "tool": "a", "preview": "second"},
+        ],
+        start=2,
+    ) == [("r:tool:3", "second")]
     # B started before the backlog: A's replayed completion is recognised by the result the client holds.
     earlier: list[Message] = [later[0], AssistantMessage(id="r:msg:0", tool_calls=[call(0), call(1)]), first]
-    assert replay(earlier, [
-        {"event": "tool.completed", "tool": "a", "preview": "first"},
-        {"event": "tool.completed", "tool": "a", "preview": "second"},
-    ], start=2) == [("r:tool:1", "second")]
+    assert replay(
+        earlier,
+        [
+            {"event": "tool.completed", "tool": "a", "preview": "first"},
+            {"event": "tool.completed", "tool": "a", "preview": "second"},
+        ],
+        start=2,
+    ) == [("r:tool:1", "second")]
+
+
+def test_completions_pair_with_their_start_by_id() -> None:
+    events = feed_all(
+        HermesTranslator("run_1"),
+        [
+            {"event": "tool.started", "tool": "light", "preview": "kitchen", "id": "c1"},
+            {"event": "tool.started", "tool": "light", "preview": "hall", "tool_call_id": "c2"},
+            {"event": "tool.completed", "tool": "light", "preview": "hall on", "tool_call_id": "c2"},
+            {"event": "tool.completed", "tool": "light", "preview": "kitchen on", "id": "c1"},
+        ],
+    )
+    starts = {e.metadata["preview"]: e.tool_call_id for e in events if isinstance(e, ToolCallStartEvent) and e.metadata}
+    results = {e.content: e.tool_call_id for e in events if isinstance(e, ToolCallResultEvent)}
+    assert results == {"hall on": starts["hall"], "kitchen on": starts["kitchen"]}
