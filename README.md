@@ -116,8 +116,11 @@ HermesAgent(
   FIFO order per tool name, which is wrong if two calls of the same tool finish out of order; the
   call's arguments are not available (the `preview` summary is in `metadata`).
 - The default `InMemoryThreadStore` lives in one process; use a shared store for several workers.
-  A store implements `get`, `put` and `put_if_run` (write only if the record still owns that
-  Hermes run), which keeps a finished stream from releasing a newer run.
+  A store implements `get`, `put` and `put_if_run`. `put_if_run` must be an atomic compare-and-set:
+  it writes only if the stored record still owns that Hermes run and still has the `version` the
+  caller read, and bumps `version`. That keeps a finished stream from releasing a newer run and
+  two workers attaching to the same run from losing one attachment (the agent re-reads and
+  retries).
 - Only the text of the last user message is sent. History lives in the Hermes session; when the
   store knows no session for a thread, prior text messages go as `conversation_history`.
 - A new run on a thread stops that thread's unfinished Hermes run. A retry of the same AG-UI run

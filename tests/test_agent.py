@@ -20,7 +20,7 @@ from ag_ui.core import (
 )
 from fastapi import FastAPI
 
-from ag_ui_hermes import HermesAgent, HermesRunsClient, ThreadRecord, approval_choice
+from ag_ui_hermes import HermesAgent, HermesRunsClient, InMemoryThreadStore, ThreadRecord, approval_choice
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from . import connect_cases
@@ -176,6 +176,33 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
     record = await agent.store.get("t1")  # the finished run_1 did not release run_2
     assert record and record.run_id == "run_2" and record.agui_run_ids == ["r2"]
     second.cancel()
+
+
+async def test_concurrent_rejoins_both_own_the_run() -> None:
+    class SlowStore(InMemoryThreadStore):  # a shared store: reads and writes interleave
+        async def get(self, thread_id: str) -> ThreadRecord | None:
+            record = await super().get(thread_id)
+            await asyncio.sleep(0)
+            return record
+
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, asyncio.Event()])
+    agent = make_agent(fake)
+    agent.store = SlowStore()
+    first = asyncio.create_task(collect(agent.run(agent_input())))
+    while not fake.runs or not fake.runs["run_1"].backlog:
+        await asyncio.sleep(0.01)
+
+    async def rejoin(run_id: str) -> None:
+        stream = agent.connect(agent_input(run_id))
+        async for event in stream:
+            if isinstance(event, TextMessageContentEvent):
+                break
+        await stream.aclose()
+
+    await asyncio.gather(rejoin("r2"), rejoin("r3"))
+    record = await agent.store.get("t1")
+    assert record and sorted(record.agui_run_ids) == ["r1", "r2", "r3"]
+    first.cancel()
 
 
 async def test_stop_endpoint_cancels_the_run() -> None:

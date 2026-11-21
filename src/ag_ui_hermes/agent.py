@@ -245,11 +245,14 @@ class HermesAgent:
     async def _update(
         self, thread_id: str, run_id: str, change: Callable[[ThreadRecord], object]
     ) -> None:
-        """Apply ``change`` to the thread's record if it still owns ``run_id``."""
-        record = await self.store.get(thread_id)
-        if record is not None and record.run_id == run_id:
+        """Apply ``change`` to the thread's record while it still owns ``run_id``."""
+        while True:
+            record = await self.store.get(thread_id)
+            if record is None or record.run_id != run_id:
+                return
             change(record)
-            await self.store.put_if_run(thread_id, record, run_id)
+            if await self.store.put_if_run(thread_id, record, run_id):
+                return
 
     async def _attach(self, input: RunAgentInput, run_id: str) -> None:
         def attach(record: ThreadRecord) -> None:
