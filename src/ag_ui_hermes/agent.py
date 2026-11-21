@@ -465,17 +465,16 @@ class HermesAgent:
                     silent = isinstance(seq, int) and seq <= silent_until
                     if held and not silent:
                         break
-                    if event.get("event") == "approval.request" and (
-                        silent or not await self._approval_pending(run_id, event)
-                    ):
-                        t.skip(event)
-                        if silent and event.get("request_id") in reask:
-                            held.append(event)
-                            if seq == silent_until:
-                                break
-                        continue
-                    if silent:
-                        t.feed(event)
+                    approval = event.get("event") == "approval.request"
+                    if silent or (approval and not await self._approval_pending(run_id, event)):
+                        if not approval:
+                            t.feed(event)
+                        else:
+                            t.skip(event)
+                            if silent and event.get("request_id") in reask:
+                                held.append(event)
+                        if held and seq == silent_until:
+                            break
                         continue
                     if not opened:
                         opened = True
