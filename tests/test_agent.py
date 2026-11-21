@@ -373,8 +373,13 @@ async def test_connect_without_a_live_run_restores_the_filtered_session_history(
     assert [c["function"] for c in dumped[1]["toolCalls"]] == [{"name": "calc", "arguments": "{}"}]
     held = await collect(agent.connect(agent_input("r3")))  # the client keeps what it holds
     assert [e.type.value for e in held] == ["RUN_STARTED", "RUN_FINISHED"]
-    agent.tool_filter = None  # without a filter the results come back too
-    restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r4", messages=[]))))[1]
+    # Stored results are neither truncated nor redacted like live previews: only an opt-in restores them.
+    agent.tool_filter = None
+    unfiltered = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r4", messages=[]))))[1]
+    assert isinstance(unfiltered, MessagesSnapshotEvent)
+    assert [m.role for m in unfiltered.messages] == ["user", "assistant", "assistant", "assistant"]
+    agent.restore_tool_results = True
+    restored = (await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r5", messages=[]))))[1]
     assert isinstance(restored, MessagesSnapshotEvent)
     assert [m.id for m in restored.messages if m.role == "tool"] == ["hermes:msg:3", "hermes:msg:4"]
 

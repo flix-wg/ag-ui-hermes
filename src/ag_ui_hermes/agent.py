@@ -154,6 +154,7 @@ class HermesAgent:
         allow_image_urls: bool = False,
         max_image_bytes: int | None = 5 * 2**20,
         max_message_image_bytes: int | None = 20 * 2**20,
+        restore_tool_results: bool = False,
     ) -> None:
         if unknown := set(forwarded_props) - _FORWARDABLE:
             raise ValueError(f"forwarded_props allows only {sorted(_FORWARDABLE)}, not {sorted(unknown)}")
@@ -189,6 +190,8 @@ class HermesAgent:
         """Largest decoded inline image; ``None`` for no limit."""
         self.max_message_image_bytes = max_message_image_bytes
         """Largest total of decoded inline images in one message; ``None`` for no limit."""
+        self.restore_tool_results = restore_tool_results
+        """Restore stored tool results on connect; they are neither truncated nor redacted like live previews."""
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def run(self, input: RunAgentInput, *, request: Any = None) -> AsyncGenerator[BaseEvent, None]:
@@ -489,7 +492,7 @@ class HermesAgent:
         except HermesError as exc:
             logger.warning("Could not load the history of Hermes session %s: %s", session_id, exc)
             return []
-        return _history_messages(rows, partial(self.tool_filter, ctx) if self.tool_filter else None)
+        return _history_messages(rows, partial(self.tool_filter, ctx) if self.tool_filter else None, results=self.restore_tool_results)
 
     def _translator(self, ctx: HookContext, hermes_run_id: str) -> HermesTranslator:
         return HermesTranslator(
@@ -911,15 +914,17 @@ def _base64_size(data: str) -> int:
     return len(data) * 3 // 4 - data.count("=")
 
 
-def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None) -> list[Message]:
+def _history_messages(
+    rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[str, str, Mapping[str, Any]], tuple[str, str] | None] | None, *, results: bool
+) -> list[Message]:
     """AG-UI messages for stored Hermes session rows (user, assistant with tool calls, tool).
 
     Tool calls pass ``tool_filter`` with an empty preview, since stored rows keep none, and
-    carry no arguments, as on the live stream. A filter may hide a call by its preview, so
-    with a filter set no result is restored; without one, a result whose call is unknown is
-    left out.
+    carry no arguments, as on the live stream. Stored results are whole and unredacted, so
+    they are restored only with ``results``, for calls that were restored, and pass the
+    filter as a ``tool.completed`` whose preview is the stored content.
     """
-    visible: set[str] = set()  # restored call ids
+    visible: dict[str, str] = {}  # restored call id -> tool name
     out: list[Message] = []
     for row in rows:
         mid, role, content = f"hermes:msg:{row.get('id')}", row.get("role"), row.get("content")
@@ -940,12 +945,15 @@ def _history_messages(rows: Sequence[Mapping[str, Any]], tool_filter: Callable[[
                 event = {"event": "tool.started", "tool": name, "preview": "", "arguments": c["function"].get("arguments")}
                 shown = tool_filter(name, "", event) if tool_filter else (name, "")
                 if shown is not None:
-                    visible.add(c["id"])
+                    visible[c["id"]] = name
                     calls.append(ToolCall(id=c["id"], function=FunctionCall(name=shown[0], arguments="{}")))
             if text or calls:
                 out.append(AssistantMessage(id=mid, content=text or None, tool_calls=calls or None))
-        elif role == "tool" and tool_filter is None and str(row.get("tool_call_id")) in visible:
-            out.append(ToolMessage(id=mid, content=text, tool_call_id=str(row["tool_call_id"])))
+        elif role == "tool" and results and (tool := visible.get(str(row.get("tool_call_id")))) is not None:
+            event = {"event": "tool.completed", "tool": tool, "preview": text}
+            shown = tool_filter(tool, text, event) if tool_filter else (tool, text)
+            if shown is not None:
+                out.append(ToolMessage(id=mid, content=shown[1], tool_call_id=str(row["tool_call_id"])))
     return out
 
 
