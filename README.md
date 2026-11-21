@@ -101,7 +101,7 @@ after the last tool call. A missing suffix is appended, unstreamed output become
 ```python
 HermesAgent(
     client,
-    store=MyThreadStore(),                          # ThreadStore protocol: get/put ThreadRecord
+    store=MyThreadStore(),                          # ThreadStore protocol: get/put_if_run ThreadRecord
     tool_filter=lambda tool, preview, event: None if tool == "secrets" else (tool, preview),
     custom_event_mapper=lambda event: None,         # host-specific events -> AG-UI events
     state_provider=load_state,                      # async thread_id -> STATE_SNAPSHOT
@@ -117,11 +117,11 @@ HermesAgent(
   FIFO order per tool name, which is wrong if two calls of the same tool finish out of order; the
   call's arguments are not available (the `preview` summary is in `metadata`).
 - The default `InMemoryThreadStore` lives in one process; use a shared store for several workers.
-  A store implements `get`, `put` and `put_if_run`. `put_if_run` must be an atomic compare-and-set:
+  A store implements `get` and `put_if_run`. `put_if_run` must be an atomic compare-and-set:
   it writes only if the stored record still owns that Hermes run and still has the `version` the
-  caller read, and bumps `version`. That keeps a finished stream from releasing a newer run and
-  two workers attaching to the same run from losing one attachment (the agent re-reads and
-  retries).
+  caller read, and bumps `version` (a missing record counts as an empty one with `run_id=None`,
+  `version=0`). That keeps a finished stream from releasing a newer run, and two workers starting
+  or attaching on the same thread from losing each other's writes (the agent re-reads and retries).
 - Only the text of the last user message is sent. History lives in the Hermes session; when the
   store knows no session for a thread, prior text messages go as `conversation_history`.
 - A new run on a thread stops that thread's unfinished Hermes run. A retry of the same AG-UI run

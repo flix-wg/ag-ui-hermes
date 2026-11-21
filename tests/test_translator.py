@@ -7,6 +7,7 @@ from ag_ui.core import (
     FunctionCall,
     Message,
     MessagesSnapshotEvent,
+    ReasoningMessage,
     RunFinishedEvent,
     TextMessageContentEvent,
     ToolCall,
@@ -160,6 +161,28 @@ def test_truncated_backlog_reconciles_from_the_final_output() -> None:
     assert len(snapshots) == 1
     assert [m.id for m in snapshots[0].messages] == ["u1", "r:msg:0", "r:tool:0:result", "r:final"]
     assert snapshots[0].messages[-1].content == "Hello world"
+
+    # A completion whose start was evicted belongs to the call the client holds, never a new one.
+    tools = HermesTranslator("r")
+    tools.start("thread", "agui-run", held[:2], replay=True)
+    completed = tools.feed({"event": "tool.completed", "tool": "a", "preview": "done", "seq": 5})
+    completed += tools.feed({"event": "tool.completed", "tool": "a", "preview": "again", "seq": 6})
+    assert [(type(e).__name__, getattr(e, "tool_call_id", None)) for e in completed] == [
+        ("ToolCallResultEvent", "r:tool:0")
+    ]
+
+    # Stale held text is replaced even when the fresh final segment already equals the output.
+    stale = HermesTranslator("r")
+    out = stale.start("thread", "agui-run", [held[0], ReasoningMessage(id="r:reasoning:5", content="old")], replay=True)
+    for seq, event in enumerate([
+        {"event": "reasoning.available", "text": "new"},
+        {"event": "message.delta", "delta": "Hello"},
+        {"event": "run.completed", "output": "Hello"},
+    ], start=5):
+        out += stale.feed({**event, "seq": seq})
+    assert [e.delta for e in out if isinstance(e, TextMessageContentEvent)] == ["Hello"]
+    fixed = next(e for e in out if isinstance(e, MessagesSnapshotEvent))
+    assert [m.content for m in fixed.messages] == ["Hi", "new", "Hello"]
 
     # Another call may have opened in the evicted part, so the approval is not bound.
     approval = HermesTranslator("r")

@@ -187,11 +187,8 @@ class HermesTranslator:
         seq = event.get("seq")
         reset: list[BaseEvent] = []
         if isinstance(seq, int):
-            if seq <= self.last_seq:
+            if not self.skip(event):
                 return []
-            if self.last_seq < 0 and seq > 0:
-                self._truncate()
-            self.last_seq = seq
             key = str(seq)
             if self._reset_pending:
                 reset = self._reset()
@@ -199,6 +196,16 @@ class HermesTranslator:
             self._local += 1
             key = f"x{self._local}"
         return reset + self._dispatch(event, key)
+
+    def skip(self, event: Mapping[str, Any]) -> bool:
+        """Count ``event`` as received without translating it; ``False`` if already seen."""
+        seq = event.get("seq")
+        if not isinstance(seq, int) or seq <= self.last_seq:
+            return False
+        if self.last_seq < 0 and seq > 0:
+            self._truncate()
+        self.last_seq = seq
+        return True
 
     def _reset(self) -> list[BaseEvent]:
         """Drop the client's copy of this run so a full replay can rebuild it.
@@ -391,7 +398,7 @@ class HermesTranslator:
         held = final is not None and final.id in self._known_text
         if streamed.strip() == output.strip() and not self._held_stale:
             return []
-        if final is not None and final.open and not held and output.startswith(streamed):
+        if final is not None and final.open and not held and not self._held_stale and output.startswith(streamed):
             return self._append(final, output[len(streamed):])
         known = {m.id for m in self.messages()}
         # Text the replay could not rebuild (its start was evicted) is replaced by the output.
@@ -456,13 +463,18 @@ class HermesTranslator:
 
     def _tool_completed(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         raw = str(event.get("tool") or "tool")
+        self.completed_tool = raw
         call = next((c for c in self._open_calls if c.raw_name == raw), None)
         events: list[BaseEvent] = []
-        if call is None:
+        if call is None and self.truncated:
+            call = self._held_call(event)
+            if call is None:
+                return []
+        elif call is None:
             events = self._tool_started(event, key)
             call = self._open_calls[-1]
-        self._open_calls.remove(call)
-        self.completed_tool = raw
+        if call in self._open_calls:
+            self._open_calls.remove(call)
         for rid, interrupt in list(self.pending_interrupts.items()):
             if interrupt.tool_call_id == call.id:
                 del self.pending_interrupts[rid]
@@ -480,6 +492,20 @@ class HermesTranslator:
             )
         )
         return events
+
+    def _held_call(self, event: Mapping[str, Any]) -> _ToolCall | None:
+        """The oldest unfinished call the client holds for a completion whose start was evicted."""
+        view = self._view(event)
+        finished = {m.tool_call_id for m in self._prior if isinstance(m, ToolMessage)}
+        finished |= {c.id for c in self._order if isinstance(c, _ToolCall)}
+        held = (
+            c for m in self._prior
+            if isinstance(m, AssistantMessage) and m.id.startswith(self.id_prefix)
+            for c in m.tool_calls or ()
+            if view and c.function.name == view[0] and c.id not in finished
+        )
+        call = next(held, None)
+        return _ToolCall(call.id, str(event.get("tool") or "tool"), call.function.name, False) if call else None
 
     def _open_visible_call(self, prefer: str | None = None) -> _ToolCall | None:
         visible = [c for c in self._open_calls if not c.hidden]
