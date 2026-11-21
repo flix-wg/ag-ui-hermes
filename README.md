@@ -152,7 +152,7 @@ text, Hermes URLs or Hermes's error bodies. The cause goes to the `ag_ui_hermes`
 | `hermes_timeout` | The run did not finish within `poll_timeout` while its status was polled |
 | `store_conflict` | The thread store kept refusing compare-and-set writes |
 | `internal_error` | Any other exception (a store or hook failure, a bug) |
-| `failed`, `interrupted` | The Hermes run itself ended that way (the message is the run's `error`) |
+| `failed`, `interrupted` | The Hermes run itself ended that way (the message is generic; the cause stays in Hermes) |
 
 Input and authorization errors are found before anything is started or stopped. The endpoint
 answers them with HTTP 400 or 403 and `{"error": {"code", "message"}}` instead of a stream;

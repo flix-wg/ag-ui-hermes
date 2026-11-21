@@ -361,14 +361,13 @@ class HermesTranslator:
                 )
             )
         self._subagents.clear()
-        error = str(status.get("error") or f"Hermes run {state}")
         usage = token_usage(status)
         if state == "completed":
             outcome: Any = RunFinishedSuccessOutcome()
         elif state == "cancelled":
             outcome = RunFinishedCancelledOutcome()
         else:
-            events.append(RunErrorEvent(message=error, code=state, usage=usage))
+            events.append(RunErrorEvent(message=f"The Hermes run {state}.", code=state, usage=usage))
             return events
         events.append(
             RunFinishedEvent(thread_id=self.thread_id, run_id=self.run_id, outcome=outcome, usage=usage)
