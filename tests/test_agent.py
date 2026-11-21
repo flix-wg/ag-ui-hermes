@@ -16,7 +16,7 @@ from ag_ui.core import (
 )
 from fastapi import FastAPI
 
-from ag_ui_hermes import HermesAgent, HermesRunsClient, ThreadRecord
+from ag_ui_hermes import HermesAgent, HermesRunsClient, ThreadRecord, approval_choice
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from .fake_hermes import FakeHermes, Step
@@ -63,9 +63,21 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     assert (interrupt.id, interrupt.reason, interrupt.tool_call_id) == ("req-1", "tool_call", tool_call.tool_call_id)
     assert interrupt.metadata and interrupt.metadata["choices"] == ["once", "session", "always", "deny"]
 
-    resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload={"approved": True})]
-    second = await collect(agent.run(agent_input("r2", resume=resume)))
-    assert ("POST", "/v1/runs/run_1/approval", {"request_id": "req-1", "choice": "once"}) in fake.calls
+    always = [ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always"})]
+    rejected = await collect(agent.run(agent_input("r2", resume=always)))
+    assert [e.type.value for e in rejected] == ["RUN_STARTED", "RUN_ERROR"]
+    assert approval_choice(
+        ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})
+    ) == "deny"
+
+    resume = [
+        ResumeEntry(interrupt_id="req-1", status="resolved", payload={"approved": True}),
+        ResumeEntry(interrupt_id="req-1", status="resolved", payload="once"),
+        ResumeEntry(interrupt_id="req-stale", status="resolved", payload={"approved": True}),
+    ]
+    second = await collect(agent.run(agent_input("r3", resume=resume)))
+    approvals = [c for c in fake.calls if c[1].endswith("/approval")]
+    assert approvals == [("POST", "/v1/runs/run_1/approval", {"request_id": "req-1", "choice": "once"})]
     assert len([c for c in fake.calls if c[:2] == ("POST", "/v1/runs")]) == 1
     result = next(e for e in second if isinstance(e, ToolCallResultEvent))
     assert result.tool_call_id == tool_call.tool_call_id

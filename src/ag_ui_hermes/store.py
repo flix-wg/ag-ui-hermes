@@ -16,6 +16,8 @@ class ThreadRecord:
     """Seq of the approval request the AG-UI run was interrupted at."""
     agui_run_ids: list[str] = field(default_factory=list)
     """AG-UI runs attached to ``run_id`` (start, resume, connect)."""
+    pending_interrupts: list[str] = field(default_factory=list)
+    """Approval request ids the last AG-UI run was interrupted with."""
 
 
 class ThreadStore(Protocol):

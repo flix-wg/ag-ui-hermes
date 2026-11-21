@@ -48,6 +48,7 @@ class HermesAgent:
         state_refresh_tools: Collection[str] = (),
         run_body: Callable[[RunAgentInput], Mapping[str, Any]] | None = None,
         poll_interval: float = 1.0,
+        allowed_choices: Collection[str] = ("once", "deny"),
     ) -> None:
         self.client = client
         self.store: ThreadStore = store or InMemoryThreadStore()
@@ -58,6 +59,8 @@ class HermesAgent:
         self.state_refresh_tools = frozenset(state_refresh_tools)
         self.run_body = run_body
         self.poll_interval = poll_interval
+        self.allowed_choices = frozenset(allowed_choices) | {"deny"}
+        """Approval choices a client may send; add ``session``/``always`` to offer them."""
 
     def translator(self, hermes_run_id: str) -> HermesTranslator:
         return HermesTranslator(
@@ -127,18 +130,32 @@ class HermesAgent:
         record = await self.store.get(input.thread_id)
         if record is None or record.run_id is None:
             raise HermesError("No interrupted Hermes run for this thread")
-        for entry in input.resume or ():
+        answers = self._answers(input.resume or (), record.pending_interrupts)
+        for request_id, choice in answers.items():
             try:
-                await self.client.respond_approval(
-                    record.run_id, request_id=entry.interrupt_id, choice=approval_choice(entry)
-                )
+                await self.client.respond_approval(record.run_id, request_id=request_id, choice=choice)
             except HermesAPIError as exc:
                 if exc.status != 409:  # already answered or timed out: keep following the run
                     raise
+        await self._update(
+            input.thread_id, record.run_id,
+            lambda r: setattr(r, "pending_interrupts", [i for i in r.pending_interrupts if i not in answers]),
+        )
         await self._attach(input, record.run_id)
         translator = self.translator(record.run_id)
         async for event in self._stream(input, translator, silent_until=record.cursor):
             yield event
+
+    def _answers(self, entries: Sequence[ResumeEntry], pending: Sequence[str]) -> dict[str, str]:
+        """One Hermes choice per pending interrupt; rejects choices the host does not allow."""
+        answers: dict[str, str] = {}
+        for entry in entries:
+            choice = approval_choice(entry)
+            if choice not in self.allowed_choices:
+                raise HermesError(f"Approval choice {choice!r} is not allowed")
+            if answers.setdefault(entry.interrupt_id, choice) != choice:
+                raise HermesError(f"Conflicting answers for interrupt {entry.interrupt_id!r}")
+        return {i: c for i, c in answers.items() if i in pending}
 
     async def _connect(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
         record = await self.store.get(input.thread_id)
@@ -230,11 +247,15 @@ class HermesAgent:
         await self._update(input.thread_id, run_id, attach)
 
     async def _suspend(self, thread_id: str, t: HermesTranslator, cursor: int) -> None:
-        await self._update(thread_id, t.hermes_run_id, lambda r: setattr(r, "cursor", cursor))
+        def suspend(record: ThreadRecord) -> None:
+            record.cursor, record.pending_interrupts = cursor, list(t.pending_interrupts)
+
+        await self._update(thread_id, t.hermes_run_id, suspend)
 
     async def _release(self, thread_id: str, run_id: str) -> None:
         def release(record: ThreadRecord) -> None:
-            record.run_id, record.cursor, record.agui_run_ids = None, -1, []
+            record.run_id, record.cursor = None, -1
+            record.agui_run_ids, record.pending_interrupts = [], []
 
         await self._update(thread_id, run_id, release)
 
@@ -268,10 +289,10 @@ class HermesAgent:
 
 
 def approval_choice(entry: ResumeEntry) -> str:
-    """Map a resume entry to a Hermes approval choice (``once``/``session``/``always``/``deny``).
+    """Map a resume entry to the Hermes approval choice it asks for.
 
     Accepts ``{"approved": bool}`` (assistant-ui tool approvals), ``{"choice": str}``
-    or a bare choice string; a cancelled entry denies.
+    or a bare choice string. A cancelled entry or ``approved: false`` always denies.
     """
     payload = entry.payload
     if entry.status == "cancelled":
@@ -279,10 +300,12 @@ def approval_choice(entry: ResumeEntry) -> str:
     if isinstance(payload, str):
         return payload
     if isinstance(payload, Mapping):
+        if payload.get("approved") is False:
+            return "deny"
         if isinstance(payload.get("choice"), str):
             return str(payload["choice"])
-        if isinstance(payload.get("approved"), bool):
-            return "once" if payload["approved"] else "deny"
+        if payload.get("approved") is True:
+            return "once"
     return "deny"
 
 
