@@ -203,14 +203,16 @@ class HermesAgent:
                         opened = True
                         for opening in await self._open(t, input, replay=silent_until < 0):
                             yield opening
-                    for item in t.feed(event):
+                    items = t.feed(event)
+                    if t.suspended:  # persist before the client sees the interrupt and leaves
+                        await self._suspend(input.thread_id, t, seq if isinstance(seq, int) else t.last_seq)
+                    for item in items:
                         yield item
+                    if t.suspended:
+                        return
                     if t.completed_tool in self.state_refresh_tools:
                         for state in await self._state(input.thread_id):
                             yield state
-                    if t.suspended:
-                        await self._suspend(input.thread_id, t, seq if isinstance(seq, int) else t.last_seq)
-                        return
                     if t.done:
                         break
         except RunStreamGone:
@@ -227,10 +229,12 @@ class HermesAgent:
                 raise
             approval = status.get("approval")
             if status.get("status") == "waiting_for_approval" and isinstance(approval, dict):
-                for item in t.feed(approval):
-                    yield item
+                items = t.feed(approval)
                 if t.suspended:
                     await self._suspend(input.thread_id, t, t.last_seq)
+                for item in items:
+                    yield item
+                if t.suspended:
                     return
             for item in t.finish(status):
                 yield item

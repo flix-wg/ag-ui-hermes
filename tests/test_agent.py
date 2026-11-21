@@ -58,7 +58,13 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     fake = FakeHermes(script)
     agent = make_agent(fake)
 
-    first = await collect(agent.run(agent_input()))
+    first: list[BaseEvent] = []
+    stream = agent.run(agent_input())
+    async for event in stream:
+        first.append(event)
+        if isinstance(event, RunFinishedEvent):
+            break
+    await stream.aclose()  # the client leaves as soon as it sees the interrupt
     finished = first[-1]
     assert isinstance(finished, RunFinishedEvent) and finished.outcome
     assert finished.outcome.type == "interrupt"
