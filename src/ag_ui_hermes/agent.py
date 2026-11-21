@@ -79,9 +79,12 @@ class HermesAgent:
             async for event in events:
                 yield event
 
-    async def stop(self, thread_id: str) -> bool:
+    async def stop(self, thread_id: str, run_id: str | None = None) -> bool:
+        """Stop the thread's Hermes run; with ``run_id``, only if that AG-UI run owns it."""
         record = await self.store.get(thread_id)
         if record is None or record.run_id is None:
+            return False
+        if run_id is not None and run_id not in record.agui_run_ids:
             return False
         try:
             await self.client.stop_run(record.run_id)
@@ -92,6 +95,11 @@ class HermesAgent:
 
     async def _start(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
         record = await self.store.get(input.thread_id) or ThreadRecord()
+        if record.run_id and input.run_id in record.agui_run_ids:
+            # A transport retry of the same AG-UI run rejoins its Hermes run.
+            async for event in self._stream(input, self.translator(record.run_id)):
+                yield event
+            return
         if record.run_id:
             await self._stop_quietly(record.run_id)
         text, history = _split_messages(input.messages)
@@ -104,12 +112,15 @@ class HermesAgent:
             idempotency_key=_idempotency_key(input.thread_id, input.run_id),
             extra=self.run_body(input) if self.run_body else None,
         )
+        run_id = started.run_id
+        await self.store.put(
+            input.thread_id,
+            ThreadRecord(session_id=record.session_id, run_id=run_id, agui_run_ids=[input.run_id]),
+        )
         if record.session_id is None:
-            status = await self.client.get_run(started.run_id)
-            record.session_id = status.get("session_id") or None
-        record.run_id, record.cursor = started.run_id, -1
-        await self.store.put(input.thread_id, record)
-        async for event in self._stream(input, record, self.translator(started.run_id)):
+            session_id = (await self.client.get_run(run_id)).get("session_id") or None
+            await self._update(input.thread_id, run_id, lambda r: setattr(r, "session_id", session_id))
+        async for event in self._stream(input, self.translator(run_id)):
             yield event
 
     async def _resume(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
@@ -124,8 +135,9 @@ class HermesAgent:
             except HermesAPIError as exc:
                 if exc.status != 409:  # already answered or timed out: keep following the run
                     raise
+        await self._attach(input, record.run_id)
         translator = self.translator(record.run_id)
-        async for event in self._stream(input, record, translator, silent_until=record.cursor):
+        async for event in self._stream(input, translator, silent_until=record.cursor):
             yield event
 
     async def _connect(self, input: RunAgentInput) -> AsyncGenerator[BaseEvent, None]:
@@ -136,13 +148,13 @@ class HermesAgent:
                 thread_id=input.thread_id, run_id=input.run_id, outcome=RunFinishedSuccessOutcome()
             )
             return
-        async for event in self._stream(input, record, self.translator(record.run_id)):
+        await self._attach(input, record.run_id)
+        async for event in self._stream(input, self.translator(record.run_id)):
             yield event
 
     async def _stream(
         self,
         input: RunAgentInput,
-        record: ThreadRecord,
         t: HermesTranslator,
         *,
         silent_until: int = -1,
@@ -172,8 +184,7 @@ class HermesAgent:
                         for state in await self._state(input.thread_id):
                             yield state
                     if t.suspended:
-                        record.cursor = seq if isinstance(seq, int) else record.cursor
-                        await self.store.put(input.thread_id, record)
+                        await self._suspend(input.thread_id, t, seq if isinstance(seq, int) else t.last_seq)
                         return
                     if t.done:
                         break
@@ -187,21 +198,45 @@ class HermesAgent:
                 status = await self.client.get_run(run_id)
             except HermesAPIError as exc:
                 if exc.status == 404:  # Hermes forgot the run; release the thread
-                    record.run_id, record.cursor = None, -1
-                    await self.store.put(input.thread_id, record)
+                    await self._release(input.thread_id, run_id)
                 raise
             approval = status.get("approval")
             if status.get("status") == "waiting_for_approval" and isinstance(approval, dict):
                 for item in t.feed(approval):
                     yield item
                 if t.suspended:
+                    await self._suspend(input.thread_id, t, t.last_seq)
                     return
             for item in t.finish(status):
                 yield item
             if not t.done:
                 await asyncio.sleep(self.poll_interval)
-        record.run_id, record.cursor = None, -1
-        await self.store.put(input.thread_id, record)
+        await self._release(input.thread_id, run_id)
+
+    async def _update(
+        self, thread_id: str, run_id: str, change: Callable[[ThreadRecord], object]
+    ) -> None:
+        """Apply ``change`` to the thread's record if it still owns ``run_id``."""
+        record = await self.store.get(thread_id)
+        if record is not None and record.run_id == run_id:
+            change(record)
+            await self.store.put_if_run(thread_id, record, run_id)
+
+    async def _attach(self, input: RunAgentInput, run_id: str) -> None:
+        def attach(record: ThreadRecord) -> None:
+            if input.run_id not in record.agui_run_ids:
+                record.agui_run_ids.append(input.run_id)
+
+        await self._update(input.thread_id, run_id, attach)
+
+    async def _suspend(self, thread_id: str, t: HermesTranslator, cursor: int) -> None:
+        await self._update(thread_id, t.hermes_run_id, lambda r: setattr(r, "cursor", cursor))
+
+    async def _release(self, thread_id: str, run_id: str) -> None:
+        def release(record: ThreadRecord) -> None:
+            record.run_id, record.cursor, record.agui_run_ids = None, -1, []
+
+        await self._update(thread_id, run_id, release)
 
     async def _open(self, t: HermesTranslator, input: RunAgentInput) -> list[BaseEvent]:
         return t.start(input.thread_id, input.run_id, input.messages) + await self._state(

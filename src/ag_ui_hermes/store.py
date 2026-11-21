@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -13,12 +14,18 @@ class ThreadRecord:
     """Hermes run still owned by the thread (in flight or waiting for approval)."""
     cursor: int = -1
     """Seq of the approval request the AG-UI run was interrupted at."""
+    agui_run_ids: list[str] = field(default_factory=list)
+    """AG-UI runs attached to ``run_id`` (start, resume, connect)."""
 
 
 class ThreadStore(Protocol):
     async def get(self, thread_id: str) -> ThreadRecord | None: ...
 
     async def put(self, thread_id: str, record: ThreadRecord) -> None: ...
+
+    async def put_if_run(self, thread_id: str, record: ThreadRecord, run_id: str) -> bool:
+        """Store ``record`` only if the stored record still owns Hermes run ``run_id``."""
+        ...
 
 
 class InMemoryThreadStore:
@@ -28,8 +35,14 @@ class InMemoryThreadStore:
         self._records: dict[str, ThreadRecord] = {}
 
     async def get(self, thread_id: str) -> ThreadRecord | None:
-        record = self._records.get(thread_id)
-        return ThreadRecord(record.session_id, record.run_id, record.cursor) if record else None
+        return copy.deepcopy(self._records.get(thread_id))
 
     async def put(self, thread_id: str, record: ThreadRecord) -> None:
-        self._records[thread_id] = ThreadRecord(record.session_id, record.run_id, record.cursor)
+        self._records[thread_id] = copy.deepcopy(record)
+
+    async def put_if_run(self, thread_id: str, record: ThreadRecord, run_id: str) -> bool:
+        current = self._records.get(thread_id)
+        if current is None or current.run_id != run_id:
+            return False
+        self._records[thread_id] = copy.deepcopy(record)
+        return True

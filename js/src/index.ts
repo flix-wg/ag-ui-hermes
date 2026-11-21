@@ -21,12 +21,14 @@ export interface HermesAgentConfig extends HttpAgentConfig {
  * HttpAgent for an ag-ui-hermes endpoint. It implements `connect()`, so
  * runtimes such as `@assistant-ui/react-ag-ui` rejoin a run that is still in
  * flight instead of starting a new one. Leaving a thread only detaches;
- * `abortRun()` (an explicit cancel) also stops the Hermes run on the server.
+ * `abortRun()` (an explicit cancel) also stops the Hermes run on the server,
+ * naming the last run or connect so a late stop cannot cancel a newer run.
  */
 export class HermesAgent extends HttpAgent {
   connectUrl: string;
   stopUrl: string;
   getHeaders?: () => Record<string, string>;
+  private lastRunId?: string;
 
   constructor(config: HermesAgentConfig) {
     super(config);
@@ -41,6 +43,7 @@ export class HermesAgent extends HttpAgent {
   }
 
   protected override requestInit(input: RunAgentInput): RequestInit {
+    this.lastRunId = input.runId;
     const init = super.requestInit(input);
     return {
       ...init,
@@ -61,7 +64,7 @@ export class HermesAgent extends HttpAgent {
     void this.fetch(this.stopUrl, {
       method: "POST",
       headers: { ...this.requestHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ threadId: this.threadId }),
+      body: JSON.stringify({ threadId: this.threadId, runId: this.lastRunId }),
       keepalive: true,
     }).catch(() => undefined);
     super.abortRun();

@@ -16,7 +16,7 @@ from ag_ui.core import (
 )
 from fastapi import FastAPI
 
-from ag_ui_hermes import HermesAgent, HermesRunsClient
+from ag_ui_hermes import HermesAgent, HermesRunsClient, ThreadRecord
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from .fake_hermes import FakeHermes, Step
@@ -119,6 +119,29 @@ async def test_dropped_stream_resumes_from_last_event_id() -> None:
     assert events[-1].type.value == "RUN_FINISHED"
 
 
+async def test_retry_rejoins_and_a_replaced_run_is_not_released() -> None:
+    gate = asyncio.Event()
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate,
+                       {"event": "run.completed", "output": "Working", "completed": True}])
+    agent = make_agent(fake)
+    first = asyncio.create_task(collect(agent.run(agent_input())))
+    while not fake.runs or not fake.runs["run_1"].backlog:
+        await asyncio.sleep(0.01)
+
+    retry = agent.run(agent_input())  # same AG-UI run id, e.g. a transport retry
+    async for event in retry:
+        if isinstance(event, TextMessageContentEvent):
+            break
+    await retry.aclose()
+    assert [c[:2] for c in fake.calls if c[0] == "POST"] == [("POST", "/v1/runs")]
+
+    await agent.store.put("t1", ThreadRecord(run_id="run_newer", agui_run_ids=["r9"]))
+    gate.set()
+    assert text(await first) == "Working"
+    record = await agent.store.get("t1")
+    assert record and record.run_id == "run_newer"
+
+
 async def test_stop_endpoint_cancels_the_run() -> None:
     gate = asyncio.Event()
     fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate])
@@ -130,7 +153,9 @@ async def test_stop_endpoint_cancels_the_run() -> None:
         run = asyncio.create_task(client.post("/agent", json=body))
         while not fake.runs or not fake.runs["run_1"].backlog:
             await asyncio.sleep(0.01)
-        stopped = await client.post("/agent/stop", json={"threadId": "t1"})
+        late = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r0"})
+        assert late.json() == {"stopped": False}
+        stopped = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r1"})
         response = await run
 
     assert stopped.json() == {"stopped": True}

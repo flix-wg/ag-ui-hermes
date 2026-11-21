@@ -18,6 +18,7 @@ from .agent import HermesAgent
 class StopRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     thread_id: str = Field(alias="threadId")
+    run_id: str | None = Field(default=None, alias="runId")
 
 
 def add_hermes_fastapi_endpoint(
@@ -29,8 +30,8 @@ def add_hermes_fastapi_endpoint(
 ) -> None:
     """Register ``POST path`` (run), ``POST path/connect`` (rejoin) and ``POST path/stop``.
 
-    Closing a run or connect response only detaches the client; ``/stop`` stops the
-    Hermes run. Authentication is the host's job, for example through ``dependencies``.
+    Closing a run or connect response only detaches the client; ``/stop``
+    (``{"threadId", "runId"}``) stops the Hermes run if that AG-UI run owns it. Authentication is the host's job, for example through ``dependencies``.
     """
     base = path.rstrip("/")
     deps = list(dependencies or [])
@@ -54,4 +55,4 @@ def add_hermes_fastapi_endpoint(
 
     @app.post(f"{base}/stop", dependencies=deps)
     async def stop(body: StopRequest) -> dict[str, Any]:
-        return {"stopped": await agent.stop(body.thread_id)}
+        return {"stopped": await agent.stop(body.thread_id, body.run_id)}

@@ -37,13 +37,15 @@ describe("HermesAgent", () => {
     expect(newMessages).toMatchObject([{ id: "run_1:msg:0", content: "Hello again" }]);
   });
 
-  it("stops the server run on an explicit abort", () => {
-    const fetch = vi.fn(async () => new Response("{}"));
-    agentWith(fetch).abortRun();
+  it("stops the server run it joined on an explicit abort", async () => {
+    const fetch = vi.fn(async (url: string) => (url.endsWith("/stop") ? new Response("{}") : sse(replay)));
+    const agent = agentWith(fetch);
+    await agent.connectAgent({ runId: "r9" });
+    agent.abortRun();
 
-    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    const [url, init] = fetch.mock.calls[1] as unknown as [string, RequestInit];
     expect(url).toBe("https://app.test/agent/stop");
     expect(init.headers).toMatchObject({ "X-Static": "1", "X-CSRF-Token": "csrf" });
-    expect(JSON.parse(init.body as string)).toEqual({ threadId: "t1" });
+    expect(JSON.parse(init.body as string)).toEqual({ threadId: "t1", runId: "r9" });
   });
 });
