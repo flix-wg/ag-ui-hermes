@@ -193,7 +193,7 @@ class HermesAgent:
                         continue
                     if not opened:
                         opened = True
-                        for opening in await self._open(t, input):
+                        for opening in await self._open(t, input, replay=silent_until < 0):
                             yield opening
                     for item in t.feed(event):
                         yield item
@@ -208,7 +208,7 @@ class HermesAgent:
         except RunStreamGone:
             pass
         if not opened:
-            for opening in await self._open(t, input):
+            for opening in await self._open(t, input, replay=silent_until < 0):
                 yield opening
         while not t.done:
             try:
@@ -259,8 +259,8 @@ class HermesAgent:
 
         await self._update(thread_id, run_id, release)
 
-    async def _open(self, t: HermesTranslator, input: RunAgentInput) -> list[BaseEvent]:
-        return t.start(input.thread_id, input.run_id, input.messages) + await self._state(
+    async def _open(self, t: HermesTranslator, input: RunAgentInput, *, replay: bool) -> list[BaseEvent]:
+        return t.start(input.thread_id, input.run_id, input.messages, replay=replay) + await self._state(
             input.thread_id
         )
 

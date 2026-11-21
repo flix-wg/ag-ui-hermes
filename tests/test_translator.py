@@ -118,26 +118,22 @@ def test_approval_binds_a_tool_call_only_when_unambiguous() -> None:
     assert interrupt.metadata and interrupt.metadata["command"] == "cat ~/.ssh/id_rsa"
 
 
-def test_replay_skips_what_the_client_already_holds() -> None:
+def test_rejoin_replaces_the_clients_copy_with_a_full_replay() -> None:
     seen = HermesTranslator("run_1", tool_filter=hide_secrets)
     feed_all(seen, RUN[:7])
+    # The client holds an early message that diverged and the later ones as streamed.
     held = [UserMessage(id="u1", content="Lights on?"), *seen.messages()]
+    held[1] = AssistantMessage.model_validate({**held[1].model_dump(), "content": "Draft"})
 
     t = HermesTranslator("run_1", tool_filter=hide_secrets)
-    events = t.start("thread", "agui-run-2", held)
+    events = t.start("thread", "agui-run", held, replay=True)
     for seq, event in enumerate(RUN):
         events += t.feed({**event, "seq": seq})
-    assert [e.type.value for e in events] == [
-        "RUN_STARTED", "TOOL_CALL_RESULT",
-        "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED",
-    ]
 
-    diverged = HermesTranslator("run_1")
-    out = diverged.start("thread", "agui-run-2", [AssistantMessage(id="run_1:msg:0", content="Draft")])
-    out += diverged.feed({**RUN[0], "seq": 0})
-    snapshot = out[-1]
-    assert isinstance(snapshot, MessagesSnapshotEvent)
-    assert [(m.id, m.content) for m in snapshot.messages] == [("run_1:msg:0", "Let me ")]
+    reset = events[1]
+    assert isinstance(reset, MessagesSnapshotEvent) and [m.id for m in reset.messages] == ["u1"]
+    fresh = feed_all(HermesTranslator("run_1", tool_filter=hide_secrets), RUN)
+    assert [e.model_dump() for e in events[2:]] == [e.model_dump() for e in fresh[1:]]
 
 
 def test_truncated_backlog_reconciles_from_the_final_output() -> None:

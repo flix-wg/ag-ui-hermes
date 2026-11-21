@@ -105,10 +105,12 @@ class HermesTranslator:
 
     Ids derive from the Hermes run id and each event's ``seq``, so feeding the same
     events again (a replay from seq 0) yields identical ids. Messages passed to
-    :meth:`start` are what the client already holds: the replay skips them and sends
-    only text beyond what the client has. Call :meth:`start` once
-    per AG-UI run, then :meth:`feed` every Hermes event; :meth:`finish` takes a
-    ``GET /v1/runs/{id}`` status when the stream ended without a terminal event.
+    :meth:`start` are what the client already holds. With ``replay=True`` and a backlog
+    from seq 0, a ``MESSAGES_SNAPSHOT`` first drops the client's copy of this run and
+    the replay rebuilds it; otherwise what the client holds is skipped and
+    ``run.completed`` reconciles it. Call :meth:`start` once per AG-UI run, then
+    :meth:`feed` every Hermes event; :meth:`finish` takes a ``GET /v1/runs/{id}``
+    status when the stream ended without a terminal event.
     """
 
     def __init__(
@@ -138,6 +140,9 @@ class HermesTranslator:
         self._known_text: dict[str, str] = {}
         self._known_calls: set[str] = set()
         self._known_results: dict[str, str] = {}
+        self._reset_pending = False
+        self._held_stale = False
+        """A message the client holds has more or other text than it shows."""
         self._order: list[_Segment | _ToolCall | _Reasoning] = []
         self._segment: _Segment | None = None
         self._open_calls: list[_ToolCall] = []
@@ -149,11 +154,15 @@ class HermesTranslator:
         return f"{self.hermes_run_id}:"
 
     def start(
-        self, thread_id: str, run_id: str, messages: Iterable[Message] = ()
+        self, thread_id: str, run_id: str, messages: Iterable[Message] = (), *, replay: bool = False
     ) -> list[BaseEvent]:
-        """Open an AG-UI run, re-announcing what is still open from earlier events."""
+        """Open an AG-UI run, re-announcing what is still open from earlier events.
+
+        ``replay`` marks a rejoin that feeds the run from the start of its backlog.
+        """
         self.thread_id, self.run_id = thread_id, run_id
         self._prior = list(messages)
+        self._reset_pending = replay and any(m.id.startswith(self.id_prefix) for m in self._prior)
         self._known_text, self._known_calls, self._known_results = {}, set(), {}
         for m in self._prior:
             content = getattr(m, "content", None)
@@ -176,6 +185,7 @@ class HermesTranslator:
         if self.done:
             return []
         seq = event.get("seq")
+        reset: list[BaseEvent] = []
         if isinstance(seq, int):
             if seq <= self.last_seq:
                 return []
@@ -183,9 +193,27 @@ class HermesTranslator:
                 self._truncate()
             self.last_seq = seq
             key = str(seq)
+            if self._reset_pending:
+                reset = self._reset()
         else:
             self._local += 1
             key = f"x{self._local}"
+        return reset + self._dispatch(event, key)
+
+    def _reset(self) -> list[BaseEvent]:
+        """Drop the client's copy of this run so a full replay can rebuild it.
+
+        Both ``@ag-ui/client`` (appends to a held id) and assistant-ui (drops a stream
+        into a held id) mishandle events for messages the client already holds.
+        """
+        self._reset_pending = False
+        if self.truncated:
+            return []
+        self._prior = [m for m in self._prior if not m.id.startswith(self.id_prefix)]
+        self._known_text, self._known_calls, self._known_results = {}, set(), {}
+        return [MessagesSnapshotEvent(messages=list(self._prior))]
+
+    def _dispatch(self, event: Mapping[str, Any], key: str) -> list[BaseEvent]:
         name = str(event.get("event") or "")
         if name == "message.delta":
             delta = event.get("delta")
@@ -328,30 +356,17 @@ class HermesTranslator:
         return events + self._append(seg, delta)
 
     def _append(self, seg: _Segment, delta: str) -> list[BaseEvent]:
-        """Add ``delta`` to ``seg``, sending only what the client does not hold yet."""
+        """Add ``delta`` to ``seg``; a message the client holds is left to ``run.completed``."""
         seg.text += delta
-        known = self._known_text.get(seg.id)
-        if known is not None:
-            if known.startswith(seg.text):
-                return []
-            if not seg.text.startswith(known):
-                return self._resync()
-            del self._known_text[seg.id]
-            delta = seg.text[len(known):]
+        if seg.id in self._known_text:
+            self._held_stale = self._held_stale or self._known_text[seg.id] != seg.text
+            return []
         events: list[BaseEvent] = []
         if not seg.announced:
             seg.announced = True
             events.append(TextMessageStartEvent(message_id=seg.id, role="assistant"))
         events.append(TextMessageContentEvent(message_id=seg.id, delta=delta))
         return events
-
-    def _resync(self) -> list[BaseEvent]:
-        """The client's copy diverged from the run: replace it with a snapshot."""
-        self._known_text.clear()
-        self._known_results.clear()
-        ours = self.messages()
-        ids = {m.id for m in ours}
-        return [MessagesSnapshotEvent(messages=[m for m in self._prior if m.id not in ids] + ours)]
 
     def _close_text(self) -> list[BaseEvent]:
         seg = self._segment
@@ -373,13 +388,19 @@ class HermesTranslator:
         seg = self._segment
         final = seg if seg is not None and not seg.tool_calls else None
         streamed = final.text if final is not None else ""
-        if streamed.strip() == output.strip():
+        held = final is not None and final.id in self._known_text
+        if streamed.strip() == output.strip() and not self._held_stale:
             return []
-        if final is not None and final.open and output.startswith(streamed):
+        if final is not None and final.open and not held and output.startswith(streamed):
             return self._append(final, output[len(streamed):])
         known = {m.id for m in self.messages()}
-        stale = [m for m in self._prior if m.id.startswith(self.id_prefix) and m.id not in known]
-        if final is None and not stale:
+        # Text the replay could not rebuild (its start was evicted) is replaced by the output.
+        stale = [
+            m for m in self._prior
+            if m.id.startswith(self.id_prefix) and m.id not in known
+            and isinstance(m, AssistantMessage) and not m.tool_calls
+        ]
+        if final is None and not stale and not self._held_stale:
             seg = self._new_segment(f"{self.id_prefix}final")
             seg.open = True
             return self._append(seg, output) + self._close_text()
@@ -387,11 +408,22 @@ class HermesTranslator:
         if final is None:
             final = self._new_segment(f"{self.id_prefix}final")
         final.text = output
+        events.append(MessagesSnapshotEvent(messages=self._snapshot(stale)))
+        return events
+
+    def _snapshot(self, drop: Sequence[Message]) -> list[Message]:
+        """The client's messages with this run's rebuilt ones replaced by ours."""
         ours = self.messages()
         ids = {m.id for m in ours}
-        prior = [m for m in self._prior if m.id not in ids and m not in stale]
-        events.append(MessagesSnapshotEvent(messages=prior + ours))
-        return events
+        calls = {c.id for m in ours if isinstance(m, AssistantMessage) for c in m.tool_calls or ()}
+        prior: list[Message] = []
+        for m in self._prior:
+            if m.id in ids or m in drop:
+                continue
+            if isinstance(m, AssistantMessage) and m.tool_calls:
+                m = m.model_copy(update={"tool_calls": [c for c in m.tool_calls if c.id not in calls] or None})
+            prior.append(m)
+        return prior + ours
 
     # -- tools ----------------------------------------------------------------
 
@@ -466,7 +498,8 @@ class HermesTranslator:
         self._order.append(_Reasoning(id=rid, text=text))
         known = self._known_text.get(rid)
         if known is not None:
-            return events + ([] if known == text else self._resync())
+            self._held_stale = self._held_stale or known != text
+            return events
         return events + [
             ReasoningStartEvent(message_id=rid),
             ReasoningMessageStartEvent(message_id=rid, role="reasoning"),

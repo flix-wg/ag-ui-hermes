@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -7,6 +8,7 @@ from ag_ui.core import (
     AssistantMessage,
     BaseEvent,
     Message,
+    MessagesSnapshotEvent,
     ResumeEntry,
     RunAgentInput,
     RunFinishedEvent,
@@ -21,6 +23,7 @@ from fastapi import FastAPI
 from ag_ui_hermes import HermesAgent, HermesRunsClient, ThreadRecord, approval_choice
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
+from . import connect_cases
 from .fake_hermes import FakeHermes, Step
 
 
@@ -108,12 +111,14 @@ async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates()
 
     gate.set()
     assert first_id is not None
-    # The client already shows part of the first delta; the replay sends only the rest.
+    # The client shows part of the first delta: a snapshot drops it, the replay rebuilds it.
     held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id=first_id, content="Hel")]
     rejoined = await collect(agent.connect(agent_input("r2", held)))
+    reset = rejoined[1]
+    assert isinstance(reset, MessagesSnapshotEvent) and [m.id for m in reset.messages] == ["u1"]
     starts = [e for e in rejoined if isinstance(e, TextMessageStartEvent)]
     assert [s.message_id for s in starts] == [first_id]
-    assert text(rejoined) == "lo again"
+    assert text(rejoined) == "Hello again"
     assert rejoined[0].type.value == "RUN_STARTED" and rejoined[-1].type.value == "RUN_FINISHED"
 
     idle = await collect(agent.connect(agent_input("r3")))
@@ -177,3 +182,7 @@ async def test_stop_endpoint_cancels_the_run() -> None:
     assert stopped.json() == {"stopped": True}
     assert '"type":"RUN_STARTED"' in response.text
     assert '"outcome":{"type":"cancelled"}' in response.text
+
+
+async def test_js_connect_probe_fixture_is_current() -> None:
+    assert await connect_cases.build() == json.loads(connect_cases.FIXTURE.read_text())

@@ -1,0 +1,418 @@
+{
+ "partial": {
+  "held": [
+   {
+    "id": "u1",
+    "role": "user",
+    "content": "Hi"
+   },
+   {
+    "id": "run_1:msg:0",
+    "role": "assistant",
+    "content": "Hel"
+   }
+  ],
+  "events": [
+   {
+    "type": "RUN_STARTED",
+    "threadId": "t1",
+    "runId": "r2"
+   },
+   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:0",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:0",
+    "delta": "Hel"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:0",
+    "delta": "lo"
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:0"
+   },
+   {
+    "type": "RUN_FINISHED",
+    "threadId": "t1",
+    "runId": "r2",
+    "outcome": {
+     "type": "success"
+    }
+   }
+  ]
+ },
+ "segment_then_live": {
+  "held": [
+   {
+    "id": "u1",
+    "role": "user",
+    "content": "Hi"
+   },
+   {
+    "id": "run_1:msg:0",
+    "role": "assistant",
+    "content": "Let me check.",
+    "toolCalls": [
+     {
+      "id": "run_1:tool:1",
+      "type": "function",
+      "function": {
+       "name": "light",
+       "arguments": "{}"
+      }
+     }
+    ]
+   },
+   {
+    "id": "run_1:tool:1:result",
+    "role": "tool",
+    "content": "on",
+    "toolCallId": "run_1:tool:1"
+   },
+   {
+    "id": "run_1:msg:3",
+    "role": "assistant",
+    "content": "Hel"
+   }
+  ],
+  "events": [
+   {
+    "type": "RUN_STARTED",
+    "threadId": "t1",
+    "runId": "r2"
+   },
+   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:0",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:0",
+    "delta": "Let me check."
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_START",
+    "metadata": {
+     "preview": "kitchen"
+    },
+    "toolCallId": "run_1:tool:1",
+    "toolCallName": "light",
+    "parentMessageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_END",
+    "toolCallId": "run_1:tool:1"
+   },
+   {
+    "type": "TOOL_CALL_RESULT",
+    "metadata": {
+     "error": false,
+     "duration": null
+    },
+    "messageId": "run_1:tool:1:result",
+    "toolCallId": "run_1:tool:1",
+    "content": "on",
+    "role": "tool"
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:3",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:3",
+    "delta": "Hel"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:3",
+    "delta": "lo"
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:3"
+   },
+   {
+    "type": "RUN_FINISHED",
+    "threadId": "t1",
+    "runId": "r2",
+    "outcome": {
+     "type": "success"
+    }
+   }
+  ]
+ },
+ "held_tools": {
+  "held": [
+   {
+    "id": "u1",
+    "role": "user",
+    "content": "Hi"
+   },
+   {
+    "id": "run_1:msg:0",
+    "role": "assistant",
+    "toolCalls": [
+     {
+      "id": "run_1:tool:0",
+      "type": "function",
+      "function": {
+       "name": "a",
+       "arguments": "{}"
+      }
+     },
+     {
+      "id": "run_1:tool:2",
+      "type": "function",
+      "function": {
+       "name": "b",
+       "arguments": "{}"
+      }
+     }
+    ]
+   },
+   {
+    "id": "run_1:tool:0:result",
+    "role": "tool",
+    "content": "done a",
+    "toolCallId": "run_1:tool:0"
+   }
+  ],
+  "events": [
+   {
+    "type": "RUN_STARTED",
+    "threadId": "t1",
+    "runId": "r2"
+   },
+   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   {
+    "type": "TOOL_CALL_START",
+    "metadata": {
+     "preview": "first"
+    },
+    "toolCallId": "run_1:tool:0",
+    "toolCallName": "a",
+    "parentMessageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_END",
+    "toolCallId": "run_1:tool:0"
+   },
+   {
+    "type": "TOOL_CALL_RESULT",
+    "metadata": {
+     "error": false,
+     "duration": null
+    },
+    "messageId": "run_1:tool:0:result",
+    "toolCallId": "run_1:tool:0",
+    "content": "done a",
+    "role": "tool"
+   },
+   {
+    "type": "TOOL_CALL_START",
+    "metadata": {
+     "preview": "second"
+    },
+    "toolCallId": "run_1:tool:2",
+    "toolCallName": "b",
+    "parentMessageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_END",
+    "toolCallId": "run_1:tool:2"
+   },
+   {
+    "type": "TOOL_CALL_RESULT",
+    "metadata": {
+     "error": false,
+     "duration": null
+    },
+    "messageId": "run_1:tool:2:result",
+    "toolCallId": "run_1:tool:2",
+    "content": "done b",
+    "role": "tool"
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:4",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:4",
+    "delta": "Hello"
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:4"
+   },
+   {
+    "type": "RUN_FINISHED",
+    "threadId": "t1",
+    "runId": "r2",
+    "outcome": {
+     "type": "success"
+    }
+   }
+  ]
+ },
+ "early_diverged": {
+  "held": [
+   {
+    "id": "u1",
+    "role": "user",
+    "content": "Hi"
+   },
+   {
+    "id": "run_1:msg:0",
+    "role": "assistant",
+    "content": "Draft",
+    "toolCalls": [
+     {
+      "id": "run_1:tool:1",
+      "type": "function",
+      "function": {
+       "name": "light",
+       "arguments": "{}"
+      }
+     }
+    ]
+   },
+   {
+    "id": "run_1:tool:1:result",
+    "role": "tool",
+    "content": "on",
+    "toolCallId": "run_1:tool:1"
+   },
+   {
+    "id": "run_1:msg:3",
+    "role": "assistant",
+    "content": "Hel"
+   }
+  ],
+  "events": [
+   {
+    "type": "RUN_STARTED",
+    "threadId": "t1",
+    "runId": "r2"
+   },
+   {
+    "type": "MESSAGES_SNAPSHOT",
+    "messages": [
+     {
+      "id": "u1",
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:0",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:0",
+    "delta": "Let me check."
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_START",
+    "metadata": {
+     "preview": "kitchen"
+    },
+    "toolCallId": "run_1:tool:1",
+    "toolCallName": "light",
+    "parentMessageId": "run_1:msg:0"
+   },
+   {
+    "type": "TOOL_CALL_END",
+    "toolCallId": "run_1:tool:1"
+   },
+   {
+    "type": "TOOL_CALL_RESULT",
+    "metadata": {
+     "error": false,
+     "duration": null
+    },
+    "messageId": "run_1:tool:1:result",
+    "toolCallId": "run_1:tool:1",
+    "content": "on",
+    "role": "tool"
+   },
+   {
+    "type": "TEXT_MESSAGE_START",
+    "messageId": "run_1:msg:3",
+    "role": "assistant"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:3",
+    "delta": "Hel"
+   },
+   {
+    "type": "TEXT_MESSAGE_CONTENT",
+    "messageId": "run_1:msg:3",
+    "delta": "lo"
+   },
+   {
+    "type": "TEXT_MESSAGE_END",
+    "messageId": "run_1:msg:3"
+   },
+   {
+    "type": "RUN_FINISHED",
+    "threadId": "t1",
+    "runId": "r2",
+    "outcome": {
+     "type": "success"
+    }
+   }
+  ]
+ }
+}

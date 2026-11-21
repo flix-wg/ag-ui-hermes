@@ -74,9 +74,10 @@ newer run.
 Ids are derived from the Hermes run id and the event `seq` (`<run>:msg:<seq>`,
 `<run>:tool:<seq>`, `<run>:tool:<seq>:result`, `<run>:reasoning:<seq>`), so replaying a run from
 seq 0 reproduces them exactly. Text after a tool call starts a new assistant message; tool calls
-attach to the latest assistant message (`parentMessageId`). The request's `messages` count as what
-the client already holds: a replay skips those messages, tool calls, results and reasoning and
-sends only text beyond the client's copy (or a `MESSAGES_SNAPSHOT` if that copy is not a prefix).
+attach to the latest assistant message (`parentMessageId`). A rejoin (`connect`, or a retried run)
+replays the backlog from seq 0; if the client already holds messages of that Hermes run, a
+`MESSAGES_SNAPSHOT` first drops them so the replay rebuilds them under the same ids
+(see [docs/connect.md](docs/connect.md)).
 
 **Approvals.** The interrupt id is the Hermes `request_id`. Hermes does not say which tool call
 an approval belongs to, so only when exactly one visible tool call is open (and matches the
@@ -135,6 +136,7 @@ HermesAgent(
 ```bash
 uv run pytest && uv run mypy
 cd js && npm install && npm run build && npm test
+uv run python -m tests.connect_cases  # regenerate the streams js/src/connect.test.ts replays
 ```
 
 MIT licensed.
