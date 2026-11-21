@@ -96,6 +96,7 @@ class FakeHermes:
         self.key = key
         self.runs: dict[str, FakeRun] = {}
         self.calls: list[tuple[str, str, Any]] = []
+        self.sessions: dict[str, list[dict[str, Any]]] = {}
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -114,6 +115,12 @@ class FakeHermes:
             new = self.runs[run_id] = FakeRun(run_id, body.get("session_id") or run_id)
             new.task = asyncio.create_task(new.drive(self.scripts.pop(0)))
             return httpx.Response(202, json={"run_id": run_id, "status": "started", "replayed": False})
+        session = re.fullmatch(r"/api/sessions/([^/]+)/messages", path)
+        if session:
+            rows = self.sessions.get(session.group(1))
+            if rows is None:
+                return self._error(404, "session_not_found")
+            return httpx.Response(200, json={"object": "list", "session_id": session.group(1), "data": rows})
         match = re.fullmatch(r"/v1/runs/([^/]+)(/events|/stop|/approval)?", path)
         run = self.runs.get(match.group(1)) if match else None
         if run is None or match is None:

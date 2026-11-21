@@ -278,6 +278,33 @@ async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates()
     assert [e.type.value for e in idle] == ["RUN_STARTED", "RUN_FINISHED"]
 
 
+async def test_connect_without_a_live_run_restores_the_session_history() -> None:
+    fake = FakeHermes([{"event": "run.completed", "output": "4", "completed": True}])
+    agent = make_agent(fake)
+    await collect(agent.run(agent_input()))
+    fake.sessions["run_1"] = [
+        {"id": 1, "role": "user", "content": [{"type": "text", "text": "Sum?"},
+                                              {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+        {"id": 2, "role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "calc", "arguments": '{"x": 2}'}}]},
+        {"id": 3, "role": "tool", "content": "4", "tool_call_id": "c1"},
+        {"id": 4, "role": "assistant", "content": "4"},
+        {"id": 5, "role": "user", "content": "", "display_kind": "hidden"},
+    ]
+    events = await collect(agent.connect(RunAgentInput(thread_id="t1", run_id="r2", messages=[])))
+    assert [e.type.value for e in events] == ["RUN_STARTED", "MESSAGES_SNAPSHOT", "RUN_FINISHED"]
+    snapshot = events[1]
+    assert isinstance(snapshot, MessagesSnapshotEvent)
+    dumped = [m.model_dump(mode="json", by_alias=True, exclude_none=True) for m in snapshot.messages]
+    assert [(m["role"], m["id"]) for m in dumped] == [
+        ("user", "hermes:msg:1"), ("assistant", "hermes:msg:2"), ("tool", "hermes:msg:3"), ("assistant", "hermes:msg:4")
+    ]
+    assert dumped[0]["content"][1] == {"type": "image", "source": {"type": "data", "value": "AAAA", "mimeType": "image/png"}}
+    assert dumped[1]["toolCalls"][0]["function"] == {"name": "calc", "arguments": '{"x": 2}'}
+    held = await collect(agent.connect(agent_input("r3")))  # the client keeps what it holds
+    assert [e.type.value for e in held] == ["RUN_STARTED", "RUN_FINISHED"]
+
+
 async def test_dropped_stream_resumes_from_last_event_id() -> None:
     fake = FakeHermes(
         [

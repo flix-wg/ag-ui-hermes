@@ -14,9 +14,13 @@ from functools import partial
 from typing import Any, Literal
 
 from ag_ui.core import (
+    AssistantMessage,
     BaseEvent,
     DataSource,
+    FunctionCall,
+    ImagePart,
     Message,
+    MessagesSnapshotEvent,
     ResumeEntry,
     RunAgentInput,
     RunErrorEvent,
@@ -26,7 +30,11 @@ from ag_ui.core import (
     StateDeltaEvent,
     StateSnapshotEvent,
     SubagentFinishedEvent,
+    TextPart,
+    ToolCall,
+    ToolMessage,
     UrlSource,
+    UserMessage,
 )
 
 from ._patch import json_diff
@@ -357,6 +365,10 @@ class HermesAgent:
         record = await self.store.get(input.thread_id)
         if record is None or record.run_id is None:
             yield run_started(input.thread_id, input.run_id)
+            # A client that holds no messages gets the session's stored conversation.
+            history = await self._history(record.session_id) if record and record.session_id and not input.messages else []
+            if history:
+                yield MessagesSnapshotEvent(messages=history)
             yield RunFinishedEvent(
                 thread_id=input.thread_id, run_id=input.run_id, outcome=RunFinishedSuccessOutcome()
             )
@@ -364,6 +376,18 @@ class HermesAgent:
         await self._attach(input, record.run_id)
         async for event in self._stream(ctx, self._translator(ctx, record.run_id)):
             yield event
+
+    async def _history(self, session_id: str) -> list[Message]:
+        """The session's stored conversation, or nothing if the client cannot provide it."""
+        fetch = getattr(self.client, "session_messages", None)
+        if fetch is None:
+            return []
+        try:
+            rows = await fetch(session_id)
+        except HermesError as exc:
+            logger.warning("Could not load the history of Hermes session %s: %s", session_id, exc)
+            return []
+        return _history_messages(rows)
 
     def _translator(self, ctx: HookContext, hermes_run_id: str) -> HermesTranslator:
         return HermesTranslator(
@@ -675,6 +699,47 @@ def _image_url(source: Any) -> str:
         if lowered.startswith(("http://", "https://")) or (lowered.startswith("data:image/") and "," in url):
             return url
     raise AgentInputError("Image parts need an http(s) URL or inline image data")
+
+
+def _history_messages(rows: Sequence[Mapping[str, Any]]) -> list[Message]:
+    """AG-UI messages for stored Hermes session rows (user, assistant with tool calls, tool)."""
+    out: list[Message] = []
+    for row in rows:
+        mid, role, content = f"hermes:msg:{row.get('id')}", row.get("role"), row.get("content")
+        if row.get("display_kind") == "hidden":
+            continue
+        parts = _stored_parts(content) if isinstance(content, list) else []
+        text = content if isinstance(content, str) else "".join(p.text for p in parts if isinstance(p, TextPart))
+        if role == "user" and any(isinstance(p, ImagePart) for p in parts):
+            out.append(UserMessage(id=mid, content=list(parts)))
+        elif role == "user" and text:
+            out.append(UserMessage(id=mid, content=text))
+        elif role == "assistant":
+            calls = [
+                ToolCall(id=c["id"], function=FunctionCall(name=str(c["function"].get("name", "")),
+                                                           arguments=str(c["function"].get("arguments") or "{}")))
+                for c in row.get("tool_calls") or ()
+                if isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("function"), dict)
+            ]
+            if text or calls:
+                out.append(AssistantMessage(id=mid, content=text or None, tool_calls=calls or None))
+        elif role == "tool" and isinstance(row.get("tool_call_id"), str):
+            out.append(ToolMessage(id=mid, content=text, tool_call_id=row["tool_call_id"]))
+    return out
+
+
+def _stored_parts(content: list[Any]) -> list[TextPart | ImagePart]:
+    parts: list[TextPart | ImagePart] = []
+    for p in content:
+        url = (p.get("image_url") or {}).get("url") if isinstance(p, dict) and p.get("type") == "image_url" else None
+        if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
+            parts.append(TextPart(text=str(p["text"])))
+        elif isinstance(url, str) and url.startswith("data:") and ";base64," in url:
+            mime, data = url[5:].split(";base64,", 1)
+            parts.append(ImagePart(source=DataSource(value=data, mime_type=mime)))
+        elif isinstance(url, str) and url:
+            parts.append(ImagePart(source=UrlSource(value=url)))
+    return parts
 
 
 def _instructions(input: RunAgentInput, host: Any) -> str:

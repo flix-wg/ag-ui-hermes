@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
+from urllib.parse import quote
 
 import httpx
 
@@ -97,6 +98,11 @@ class RunsClient(Protocol):
     async def respond_approval(self, run_id: str, *, request_id: str, choice: str) -> dict[str, Any]: ...
 
     def events(self, run_id: str, *, last_seq: int = -1) -> AsyncGenerator[dict[str, Any], None]: ...
+
+    # Optional, looked up with getattr so bridges without them keep working:
+    # ``async def session_messages(self, session_id: str) -> list[dict[str, Any]]`` (the
+    # ``data`` rows of ``GET /api/sessions/{id}/messages``) and
+    # ``async def get_capabilities(self) -> dict[str, Any]`` (``GET /v1/capabilities``).
 
 
 class HermesRunsClient:
@@ -198,6 +204,16 @@ class HermesRunsClient:
     async def respond_approval(self, run_id: str, *, request_id: str, choice: str) -> dict[str, Any]:
         body = {"request_id": request_id, "choice": choice}
         return await self._request("POST", f"/v1/runs/{run_id}/approval", json_body=body)
+
+    async def session_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """The latest (up to 500) stored messages of a Hermes session, oldest first."""
+        data = (await self._request("GET", f"/api/sessions/{quote(session_id, safe='')}/messages")).get("data")
+        if not isinstance(data, list):
+            raise HermesResponseError(f"GET /api/sessions/{session_id}/messages: no data list")
+        return [row for row in data if isinstance(row, dict)]
+
+    async def get_capabilities(self) -> dict[str, Any]:
+        return await self._request("GET", "/v1/capabilities")
 
     async def events(self, run_id: str, *, last_seq: int = -1) -> AsyncGenerator[dict[str, Any], None]:
         """Yield run events, reconnecting with ``Last-Event-ID`` until the stream closes.

@@ -19,7 +19,11 @@ just drops the HTTP stream, and the server never stops a Hermes run because its 
 ## What the server sends
 
 `POST /connect` looks up the thread's Hermes run. Without one it answers `RUN_STARTED`,
-`RUN_FINISHED`. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
+`RUN_FINISHED`. If the thread has a Hermes session and the client holds no messages (a fresh page
+load), a `MESSAGES_SNAPSHOT` of the session's stored conversation (`GET
+/api/sessions/{id}/messages`, the latest 500 rows; ids `hermes:msg:<row id>`) comes between them.
+A client that already holds messages keeps them, as on every other path. A `RunsClient` without
+`session_messages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
 streams every event through a fresh translator, then follows the live stream.
 
 If the client holds messages of this Hermes run (their ids start with `<run>:`), the first
