@@ -6,9 +6,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
+import pytest
 from ag_ui.core import (
     AssistantMessage,
+    AudioPart,
     BaseEvent,
+    Context,
+    DataSource,
+    DeveloperMessage,
+    ImagePart,
     Message,
     MessagesSnapshotEvent,
     ResumeEntry,
@@ -17,15 +23,19 @@ from ag_ui.core import (
     RunFinishedEvent,
     StateDeltaEvent,
     StateSnapshotEvent,
+    SystemMessage,
     TextMessageContentEvent,
     TextMessageStartEvent,
+    TextPart,
     ToolCallResultEvent,
     ToolCallStartEvent,
+    UrlSource,
     UserMessage,
 )
 from fastapi import FastAPI
 
 from ag_ui_hermes import (
+    AgentInputError,
     HermesAgent,
     HermesRunsClient,
     HermesTranslator,
@@ -151,6 +161,40 @@ async def test_resume_that_leaves_an_approval_open_interrupts_again() -> None:
     assert not any(path.endswith("/approval") for _, path, _ in fake.calls)
     resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
     assert text(await collect(agent.run(agent_input("r3", resume=resume)))) == "done"
+
+
+async def test_run_input_maps_instructions_images_and_allowed_props() -> None:
+    fake = FakeHermes([{"event": "run.completed", "output": "", "completed": True}])
+    agent = make_agent(fake)
+    agent.run_body = lambda ctx: {"instructions": "Host rules."}
+    agent.forwarded_props = frozenset({"model"})
+    pixel = DataSource(value="iVBORw0KGgo=", mime_type="image/png")
+    messages: list[Message] = [
+        SystemMessage(id="s1", content="Be brief."),
+        DeveloperMessage(id="d1", content="Use metric units."),
+        UserMessage(id="u1", content=[ImagePart(source=pixel), ImagePart(source=UrlSource(value="https://x.test/a.jpg"))]),
+    ]
+    run = agent_input(
+        messages=messages, context=[Context(description="Page", value="/kitchen")], state={"b": 1, "a": [True]},
+        forwarded_props={"model": "gpt-x", "provider": "openai"},
+    )
+    await collect(agent.run(run))
+    body = next(b for m, path, b in fake.calls if (m, path) == ("POST", "/v1/runs"))
+    assert body["input"] == [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+        {"type": "image_url", "image_url": {"url": "https://x.test/a.jpg"}},
+    ]}]
+    assert body["instructions"] == (
+        "Host rules.\n\nBe brief.\n\nUse metric units.\n\nRuntime context:\n- Page: /kitchen"
+        '\n\nApplication state (JSON):\n{"a": [true], "b": 1}'
+    )
+    assert body["model"] == "gpt-x"
+    assert "provider" not in body
+
+    audio = UserMessage(id="u2", content=[TextPart(text="listen"), AudioPart(source=pixel)])
+    for bad in (agent_input("r2", [audio]), agent_input("r3", forwarded_props={"model": 4})):
+        with pytest.raises(AgentInputError):
+            await agent.open_run(bad)
 
 
 def apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:

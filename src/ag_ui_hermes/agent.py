@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import aclosing
@@ -14,6 +15,7 @@ from typing import Any, Literal
 
 from ag_ui.core import (
     BaseEvent,
+    DataSource,
     Message,
     ResumeEntry,
     RunAgentInput,
@@ -24,6 +26,7 @@ from ag_ui.core import (
     StateDeltaEvent,
     StateSnapshotEvent,
     SubagentFinishedEvent,
+    UrlSource,
 )
 
 from ._patch import json_diff
@@ -37,6 +40,7 @@ _STARTED_HISTORY = 32
 """Started AG-UI runs per thread whose late retries still find their Hermes run."""
 _CAS_ATTEMPTS = 50
 """Compare-and-set retries on one thread record before giving up."""
+_FORWARDABLE = frozenset({"model", "provider", "model_options"})
 
 
 @dataclass(frozen=True)
@@ -120,7 +124,10 @@ class HermesAgent:
         poll_timeout: float | None = 1800.0,
         allowed_choices: Collection[str] = ("once", "deny"),
         approval_timeout: float | None = None,
+        forwarded_props: Collection[str] = (),
     ) -> None:
+        if unknown := set(forwarded_props) - _FORWARDABLE:
+            raise ValueError(f"forwarded_props allows only {sorted(_FORWARDABLE)}, not {sorted(unknown)}")
         self.client: RunsClient = client
         self.store: ThreadStore = store or InMemoryThreadStore()
         self.authorize = authorize
@@ -139,6 +146,8 @@ class HermesAgent:
         """Approval choices a client may send; add ``session``/``always`` to offer them."""
         self.approval_timeout = approval_timeout
         """Seconds Hermes waits on an approval, announced as the interrupt's ``expiresAt``."""
+        self.forwarded_props = frozenset(forwarded_props)
+        """``forwardedProps`` keys (``model``, ``provider``, ``model_options``) a client may set on the run."""
 
     async def run(self, input: RunAgentInput, *, request: Any = None) -> AsyncGenerator[BaseEvent, None]:
         """Start a Hermes run for the last user message, or answer approvals on ``resume``.
@@ -232,24 +241,31 @@ class HermesAgent:
         if earlier is not None:
             # A transport retry rejoins its own Hermes run, even one a newer run replaced.
             return self._stream(ctx, self._translator(ctx, earlier))
-        text, history = _split_messages(input.messages)
-        if not text:
+        content, history = _split_messages(input.messages)
+        if not content:
             raise AgentInputError("No user message to send")
-        return self._start(ctx, record, text, history)
+        return self._start(ctx, record, content, history, self._forwarded(input.forwarded_props))
 
     async def _prepare_connect(self, ctx: HookContext) -> AsyncGenerator[BaseEvent, None]:
         return self._connect(ctx)
 
     async def _start(
-        self, ctx: HookContext, record: ThreadRecord, text: str, history: list[dict[str, str]]
+        self,
+        ctx: HookContext,
+        record: ThreadRecord,
+        content: str | list[dict[str, Any]],
+        history: list[dict[str, str]],
+        forwarded: dict[str, Any],
     ) -> AsyncGenerator[BaseEvent, None]:
         input = _input(ctx)
-        extra = self.run_body(ctx) if self.run_body else None
+        extra = {**forwarded, **(self.run_body(ctx) if self.run_body else {})}
+        if instructions := _instructions(input, extra.get("instructions")):
+            extra["instructions"] = instructions
         if record.run_id:
             await self._stop_quietly(record.run_id)
         new_session = record.session_id is None
         started = await self.client.start_run(
-            text,
+            content,
             session_id=record.session_id,
             conversation_history=history if new_session else None,
             idempotency_key=_idempotency_key(input.thread_id, input.run_id),
@@ -314,6 +330,16 @@ class HermesAgent:
         translator = self._translator(ctx, record.run_id)
         async for event in self._stream(ctx, translator, silent_until=record.cursor, reask=unanswered):
             yield event
+
+    def _forwarded(self, props: Any) -> dict[str, Any]:
+        """The allowed ``forwardedProps`` as ``/v1/runs`` body fields."""
+        if not self.forwarded_props or not isinstance(props, Mapping):
+            return {}
+        fields = {k: props[k] for k in self.forwarded_props if props.get(k) is not None}
+        for key, value in fields.items():
+            if not (isinstance(value, dict) if key == "model_options" else isinstance(value, str) and value.strip()):
+                raise AgentInputError(f"forwardedProps.{key} has the wrong type")
+        return fields
 
     def _answers(self, entries: Sequence[ResumeEntry]) -> dict[str, str]:
         """One Hermes choice per interrupt; rejects choices the host does not allow."""
@@ -606,8 +632,8 @@ def _text_of(message: Message) -> str:
     return ""
 
 
-def _split_messages(messages: Sequence[Message]) -> tuple[str, list[dict[str, str]]]:
-    """The last user message's text, and the user/assistant text history before it."""
+def _split_messages(messages: Sequence[Message]) -> tuple[str | list[dict[str, Any]], list[dict[str, str]]]:
+    """The last user message as Hermes input, and the user/assistant text history before it."""
     last = max((i for i, m in enumerate(messages) if m.role == "user"), default=-1)
     if last < 0:
         return "", []
@@ -616,7 +642,51 @@ def _split_messages(messages: Sequence[Message]) -> tuple[str, list[dict[str, st
         for m in messages[:last]
         if m.role in ("user", "assistant") and _text_of(m)
     ]
-    return _text_of(messages[last]), history
+    return _user_content(messages[last]), history
+
+
+def _user_content(message: Message) -> str | list[dict[str, Any]]:
+    """Text, or ``text``/``image_url`` parts when the message carries images."""
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return _text_of(message)
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        kind = getattr(part, "type", "")
+        if kind == "text":
+            if part.text:
+                parts.append({"type": "text", "text": part.text})
+        elif kind == "image":
+            parts.append({"type": "image_url", "image_url": {"url": _image_url(part.source)}})
+        else:
+            raise AgentInputError(f"Unsupported {kind!r} input part")
+    if all(p["type"] == "text" for p in parts):
+        return _text_of(message)
+    return parts
+
+
+def _image_url(source: Any) -> str:
+    """An ``http(s)`` or ``data:image/...`` URL, the image sources Hermes accepts."""
+    if isinstance(source, DataSource) and source.mime_type.lower().startswith("image/"):
+        return f"data:{source.mime_type};base64,{source.value}"
+    if isinstance(source, UrlSource):
+        url = source.value.strip()
+        lowered = url.lower()
+        if lowered.startswith(("http://", "https://")) or (lowered.startswith("data:image/") and "," in url):
+            return url
+    raise AgentInputError("Image parts need an http(s) URL or inline image data")
+
+
+def _instructions(input: RunAgentInput, host: Any) -> str:
+    """Hermes ``instructions``: the host's, system/developer messages, ``context`` and ``state``."""
+    parts = [str(host)] if host else []
+    parts += [text for m in input.messages if m.role in ("system", "developer") and (text := _text_of(m))]
+    if input.context:
+        parts.append("Runtime context:\n" + "\n".join(f"- {c.description}: {c.value}" for c in input.context))
+    if input.state is not None and input.state != {}:
+        state = json.dumps(input.state, sort_keys=True, ensure_ascii=False, default=str)
+        parts.append(f"Application state (JSON):\n{state}")
+    return "\n\n".join(parts)
 
 
 def _idempotency_key(thread_id: str, run_id: str) -> str:

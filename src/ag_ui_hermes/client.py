@@ -73,7 +73,8 @@ class RunsClient(Protocol):
     own bridge instead. Errors follow Hermes: raise :class:`HermesAPIError` with the HTTP
     status (``404`` unknown run, ``409`` approval already answered or not pending),
     :class:`HermesUnreachableError` for transport failures and :class:`HermesResponseError`
-    for malformed answers. ``events`` yields Hermes-shaped events (``event``, ``seq``) from
+    for malformed answers. ``start_run`` gets the user turn as text, or as ``text`` and
+    ``image_url`` content parts when it carries images. ``events`` yields Hermes-shaped events (``event``, ``seq``) from
     ``last_seq + 1``, returns when the stream closes and raises :class:`RunStreamGoneError`
     once the run's stream is no longer available, after which the agent polls ``get_run``
     (``status``, ``output``, ``error``, ``approval``) until it is terminal.
@@ -81,7 +82,7 @@ class RunsClient(Protocol):
 
     async def start_run(
         self,
-        input: str,
+        input: str | list[dict[str, Any]],
         *,
         session_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
@@ -159,14 +160,15 @@ class HermesRunsClient:
 
     async def start_run(
         self,
-        input: str,
+        input: str | list[dict[str, Any]],
         *,
         session_id: str | None = None,
         conversation_history: list[dict[str, str]] | None = None,
         idempotency_key: str | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> StartedRun:
-        body: dict[str, Any] = {**(extra or {}), "input": input}
+        user = input if isinstance(input, str) else [{"role": "user", "content": input}]
+        body: dict[str, Any] = {**(extra or {}), "input": user}
         if session_id:
             body["session_id"] = session_id
         if conversation_history:

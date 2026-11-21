@@ -103,6 +103,23 @@ the run ends again with that interrupt.
 after the last tool call. A missing suffix is appended, unstreamed output becomes a
 `<run>:final` message, and anything else is corrected with a `MESSAGES_SNAPSHOT`.
 
+## Run input
+
+- The last user message becomes the Hermes `input`: its text, or `text` and `image_url` parts when
+  it carries image parts (inline data or an `http(s)` URL). An image-only message works. Audio,
+  video and document parts, and file-handle sources, are refused with `invalid_input` (HTTP 400).
+- Hermes `instructions` (its per-run `ephemeral_system_prompt`, never stored in the session) are
+  built on every run from the `instructions` a `run_body` hook returns, the system and developer
+  messages, `context` (as a "Runtime context" list) and `state` (as JSON with sorted keys). Hermes
+  puts them in the system prompt, so a change from one run to the next, such as a new state,
+  costs a prompt-cache miss.
+- `forwarded_props={"model", "provider", "model_options"}` (any subset; default none) lets a
+  client choose those `/v1/runs` fields through `forwardedProps`; a wrongly typed value is
+  `invalid_input`, and `run_body` fields win. Hermes refuses a model that conflicts with a
+  session's model lock (`hermes_rejected`).
+- The `Idempotency-Key` is derived from the thread and run ids and the body is built
+  deterministically, so a retried start of the same AG-UI run is recognized by Hermes.
+
 ## Hooks
 
 Every hook gets a `HookContext` first: `action` (`"run"`, `"connect"` or `"stop"`),
@@ -124,6 +141,7 @@ HermesAgent(
     on_error=lambda ctx, exc: sentry_sdk.capture_exception(exc),
     allowed_choices={"once", "session", "deny"},             # approval choices clients may send
     approval_timeout=300,                                    # Hermes approval timeout, for expiresAt
+    forwarded_props={"model"},                               # forwardedProps clients may set, see Run input
     poll_timeout=1800,                                       # give up polling a run whose stream is gone
 )
 ```
@@ -179,8 +197,8 @@ already finished). All errors derive from `HermesError`.
   caller read, and bumps `version` (a missing record counts as an empty one with `run_id=None`,
   `version=0`). That keeps a finished stream from releasing a newer run, and two workers starting
   or attaching on the same thread from losing each other's writes (the agent re-reads and retries).
-- Only the text of the last user message is sent. History lives in the Hermes session; when the
-  store knows no session for a thread, prior text messages go as `conversation_history`.
+- Only the last user message is sent. History lives in the Hermes session; when the store knows
+  no session for a thread, prior text messages go as `conversation_history` (without images).
 - A new run on a thread stops that thread's unfinished Hermes run. A retry of the same AG-UI run
   (same `runId`) rejoins that run's own Hermes run instead, even after a newer run replaced it;
   the record keeps the last 32 started runs per thread.
