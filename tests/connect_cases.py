@@ -59,8 +59,8 @@ async def _case(seen: list[dict[str, Any]], rest: list[dict[str, Any]], diverge:
     async for _ in stream:
         break
     await stream.aclose()
-    while not fake.runs["run_1"].closed:
-        await asyncio.sleep(0.01)
+    assert fake.runs["run_1"].task is not None
+    await fake.runs["run_1"].task
 
     shown = HermesTranslator("run_1")
     shown.start("t1", "r1")

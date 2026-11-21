@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 Step = dict[str, Any] | asyncio.Event
 
@@ -62,7 +64,10 @@ class FakeRun:
         next_seq = last_seq + 1
         while True:
             async with self.changed:
-                await self.changed.wait_for(lambda: len(self.backlog) > next_seq or self.closed)
+                def ready(n: int = next_seq) -> bool:
+                    return len(self.backlog) > n or self.closed
+
+                await self.changed.wait_for(ready)
                 batch = self.backlog[next_seq:]
             for event in batch:
                 if drop_after is not None and next_seq > drop_after:
