@@ -1,6 +1,7 @@
 import asyncio
+import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ from ag_ui.core import (
     MessagesSnapshotEvent,
     ResumeEntry,
     RunAgentInput,
+    RunErrorEvent,
     RunFinishedEvent,
     TextMessageContentEvent,
     TextMessageStartEvent,
@@ -21,8 +23,14 @@ from ag_ui.core import (
 from fastapi import FastAPI
 
 from ag_ui_hermes import (
-    HermesAgent, HermesRunsClient, HermesTranslator, InMemoryThreadStore, ThreadRecord, approval_choice,
+    HermesAgent,
+    HermesRunsClient,
+    HermesTranslator,
+    HookContext,
+    InMemoryThreadStore,
+    ThreadRecord,
 )
+from ag_ui_hermes.agent import _approval_choice
 from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
 
 from . import connect_cases
@@ -54,6 +62,20 @@ def text(events: list[BaseEvent]) -> str:
     return "".join(e.delta for e in events if isinstance(e, TextMessageContentEvent))
 
 
+async def until(check: Callable[[], object]) -> None:
+    """Wait for ``check`` (sync or async) to hold."""
+    async with asyncio.timeout(2):
+        while True:
+            result = check()
+            if await result if inspect.isawaitable(result) else result:
+                return
+            await asyncio.sleep(0.01)
+
+
+def streaming(fake: FakeHermes, run_id: str = "run_1") -> Callable[[], bool]:
+    return lambda: run_id in fake.runs and bool(fake.runs[run_id].backlog)
+
+
 async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     script: list[Step] = [
         {"event": "message.delta", "delta": "Running it."},
@@ -75,17 +97,19 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
             break
     await stream.aclose()  # the client leaves as soon as it sees the interrupt
     finished = first[-1]
-    assert isinstance(finished, RunFinishedEvent) and finished.outcome
+    assert isinstance(finished, RunFinishedEvent)
+    assert finished.outcome
     assert finished.outcome.type == "interrupt"
     interrupt = finished.outcome.interrupts[0]
     tool_call = next(e for e in first if isinstance(e, ToolCallStartEvent))
     assert (interrupt.id, interrupt.reason, interrupt.tool_call_id) == ("req-1", "tool_call", tool_call.tool_call_id)
-    assert interrupt.metadata and interrupt.metadata["choices"] == ["once", "session", "always", "deny"]
+    assert interrupt.metadata
+    assert interrupt.metadata["choices"] == ["once", "session", "always", "deny"]
 
     always = [ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always"})]
     rejected = await collect(agent.run(agent_input("r2", resume=always)))
     assert [e.type.value for e in rejected] == ["RUN_STARTED", "RUN_ERROR"]
-    assert approval_choice(
+    assert _approval_choice(
         ResumeEntry(interrupt_id="req-1", status="resolved", payload={"choice": "always", "approved": False})
     ) == "deny"
 
@@ -100,8 +124,10 @@ async def test_approval_interrupts_and_resume_continues_the_same_run() -> None:
     assert len([c for c in fake.calls if c[:2] == ("POST", "/v1/runs")]) == 1
     result = next(e for e in second if isinstance(e, ToolCallResultEvent))
     assert result.tool_call_id == tool_call.tool_call_id
-    assert text(first) == "Running it." and text(second) == "Deleted."
-    assert isinstance(second[-1], RunFinishedEvent) and second[-1].outcome
+    assert text(first) == "Running it."
+    assert text(second) == "Deleted."
+    assert isinstance(second[-1], RunFinishedEvent)
+    assert second[-1].outcome
     assert second[-1].outcome.type == "success"
 
 
@@ -130,11 +156,13 @@ async def test_disconnect_keeps_the_run_and_connect_replays_without_duplicates()
     held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id=first_id, content="Hel")]
     rejoined = await collect(agent.connect(agent_input("r2", held)))
     reset = rejoined[1]
-    assert isinstance(reset, MessagesSnapshotEvent) and [m.id for m in reset.messages] == ["u1"]
+    assert isinstance(reset, MessagesSnapshotEvent)
+    assert [m.id for m in reset.messages] == ["u1"]
     starts = [e for e in rejoined if isinstance(e, TextMessageStartEvent)]
     assert [s.message_id for s in starts] == [first_id]
     assert text(rejoined) == "Hello again"
-    assert rejoined[0].type.value == "RUN_STARTED" and rejoined[-1].type.value == "RUN_FINISHED"
+    assert rejoined[0].type.value == "RUN_STARTED"
+    assert rejoined[-1].type.value == "RUN_FINISHED"
 
     idle = await collect(agent.connect(agent_input("r3")))
     assert [e.type.value for e in idle] == ["RUN_STARTED", "RUN_FINISHED"]
@@ -160,8 +188,7 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
                       [{"event": "message.delta", "delta": "Newer"}, asyncio.Event()])
     agent = make_agent(fake)
     first = asyncio.create_task(collect(agent.run(agent_input())))
-    while not fake.runs or not fake.runs["run_1"].backlog:
-        await asyncio.sleep(0.01)
+    await until(streaming(fake))
 
     retry = agent.run(agent_input())  # same AG-UI run id, e.g. a transport retry
     async for event in retry:
@@ -171,11 +198,11 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
     assert [c[:2] for c in fake.calls if c[0] == "POST"] == [("POST", "/v1/runs")]
 
     second = asyncio.create_task(collect(agent.run(agent_input("r2"))))  # replaces run_1
-    while "run_2" not in fake.runs or not fake.runs["run_2"].backlog:
-        await asyncio.sleep(0.01)
+    await until(streaming(fake, "run_2"))
     late = await collect(agent.run(agent_input()))  # a retry of r1 that arrives after r2
     assert text(late) == "Working"
-    assert isinstance(late[-1], RunFinishedEvent) and late[-1].outcome
+    assert isinstance(late[-1], RunFinishedEvent)
+    assert late[-1].outcome
     assert late[-1].outcome.type == "cancelled"
     assert [c[:2] for c in fake.calls if c[0] == "POST"] == [
         ("POST", "/v1/runs"), ("POST", "/v1/runs/run_1/stop"), ("POST", "/v1/runs")
@@ -183,7 +210,9 @@ async def test_retries_rejoin_their_own_run_even_after_it_was_replaced() -> None
 
     assert text(await first) == "Working"
     record = await agent.store.get("t1")  # the finished run_1 did not release run_2
-    assert record and record.run_id == "run_2" and record.agui_run_ids == ["r2"]
+    assert record
+    assert record.run_id == "run_2"
+    assert record.agui_run_ids == ["r2"]
     second.cancel()
 
 
@@ -192,11 +221,10 @@ async def test_concurrent_starts_keep_both_retry_mappings() -> None:
     agent = make_agent(fake)
     agent.store = SlowStore()
     runs = [asyncio.create_task(collect(agent.run(agent_input(r)))) for r in ("r1", "r2")]
-    async with asyncio.timeout(2):
-        while not any(c[1].endswith("/stop") for c in fake.calls):
-            await asyncio.sleep(0.01)
+    await until(lambda: any(c[1].endswith("/stop") for c in fake.calls))
     record = await agent.store.get("t1")
-    assert record and record.started == {"r1": "run_1", "r2": "run_2"}
+    assert record
+    assert record.started == {"r1": "run_1", "r2": "run_2"}
     stopped = next(c[1] for c in fake.calls if c[1].endswith("/stop"))
     assert stopped != f"/v1/runs/{record.run_id}/stop"  # the run that lost the record was stopped
     for task in runs:
@@ -208,11 +236,14 @@ async def test_suspend_never_restores_an_answered_or_older_approval() -> None:
     t = HermesTranslator("run_1")
     t.start("t1", "r1")
     t.feed({"event": "approval.request", "request_id": "A", "seq": 2})
-    for cursor, pending in [(5, ["B"]), (2, [])]:  # B persisted later / A answered by another client
-        await agent.store.put_if_run("t1", ThreadRecord(run_id="run_1", cursor=cursor, pending_interrupts=pending), None)
-        await agent._suspend("t1", t, 2)
+    # B persisted later / A answered by another client
+    for cursor, pending, answered in [(5, ["B"], []), (2, [], ["A"])]:
+        stale = ThreadRecord(run_id="run_1", cursor=cursor, pending_interrupts=pending, answered_interrupts=answered)
+        await agent.store.put_if_run("t1", stale, None)
+        assert await agent._suspend("t1", t, 2) is False
         record = await agent.store.get("t1")
-        assert record and (record.cursor, record.pending_interrupts) == (cursor, pending)
+        assert record
+        assert (record.cursor, record.pending_interrupts) == (cursor, pending)
         agent.store = InMemoryThreadStore()
 
 
@@ -239,7 +270,8 @@ async def test_answered_approval_at_seq_0_does_not_look_like_truncation() -> Non
     assert message_id is not None
     held: list[Message] = [UserMessage(id="u1", content="Hi"), AssistantMessage(id=message_id, content="Hel")]
     rejoined = await collect(agent.connect(agent_input("r3", held)))
-    assert isinstance(rejoined[1], MessagesSnapshotEvent) and [m.id for m in rejoined[1].messages] == ["u1"]
+    assert isinstance(rejoined[1], MessagesSnapshotEvent)
+    assert [m.id for m in rejoined[1].messages] == ["u1"]
     assert text(rejoined) == "Hello"
 
 
@@ -248,8 +280,7 @@ async def test_concurrent_rejoins_both_own_the_run() -> None:
     agent = make_agent(fake)
     agent.store = SlowStore()
     first = asyncio.create_task(collect(agent.run(agent_input())))
-    while not fake.runs or not fake.runs["run_1"].backlog:
-        await asyncio.sleep(0.01)
+    await until(streaming(fake))
 
     async def rejoin(run_id: str) -> None:
         stream = agent.connect(agent_input(run_id))
@@ -260,7 +291,8 @@ async def test_concurrent_rejoins_both_own_the_run() -> None:
 
     await asyncio.gather(rejoin("r2"), rejoin("r3"))
     record = await agent.store.get("t1")
-    assert record and sorted(record.agui_run_ids) == ["r1", "r2", "r3"]
+    assert record
+    assert sorted(record.agui_run_ids) == ["r1", "r2", "r3"]
     first.cancel()
 
 
@@ -273,8 +305,7 @@ async def test_stop_endpoint_cancels_the_run() -> None:
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://app") as client:
         run = asyncio.create_task(client.post("/agent", json=body))
-        while not fake.runs or not fake.runs["run_1"].backlog:
-            await asyncio.sleep(0.01)
+        await until(streaming(fake))
         late = await client.post("/agent/stop", json={"threadId": "t1", "runId": "r0"})
         assert late.json() == {"stopped": False}
         unnamed = await client.post("/agent/stop", json={"threadId": "t1"})
@@ -285,6 +316,179 @@ async def test_stop_endpoint_cancels_the_run() -> None:
     assert stopped.json() == {"stopped": True}
     assert '"type":"RUN_STARTED"' in response.text
     assert '"outcome":{"type":"cancelled"}' in response.text
+
+
+async def test_endpoint_authorizes_and_validates_before_touching_the_run() -> None:
+    gate = asyncio.Event()
+    fake = FakeHermes([{"event": "message.delta", "delta": "Working"}, gate,
+                       {"event": "run.completed", "output": "Working", "completed": True}])
+    seen: list[tuple[str, str | None]] = []
+
+    async def authorize(ctx: HookContext) -> bool:
+        user = ctx.request.headers.get("x-user") if ctx.request else None
+        seen.append((ctx.action, user))
+        return user == "felix"
+
+    agent = make_agent(fake)
+    agent.authorize = authorize
+    app = FastAPI()
+    add_hermes_fastapi_endpoint(app, agent, "/agent", tags=["agent"])
+    assert sum(getattr(route, "tags", None) == ["agent"] for route in app.routes) == 3
+    owner, eve = {"x-user": "felix"}, {"x-user": "eve"}
+    body = agent_input().model_dump(mode="json", by_alias=True)
+    no_text = agent_input("r2", [AssistantMessage(id="a1", content="?")]).model_dump(mode="json", by_alias=True)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://app") as client:
+        run = asyncio.create_task(client.post("/agent", json=body, headers=owner))
+        await until(streaming(fake))
+        for route, payload in [("/agent", body), ("/agent/connect", body), ("/agent/stop", {"threadId": "t1", "runId": "r1"})]:
+            denied = await client.post(route, json=payload, headers=eve)
+            assert denied.status_code == 403
+            assert denied.json()["error"]["code"] == "forbidden"
+        invalid = await client.post("/agent", json=no_text, headers=owner)
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["code"] == "invalid_input"
+        assert not any(path.endswith("/stop") for _, path, _ in fake.calls)  # validated before stopping run_1
+        rejoin = asyncio.create_task(
+            client.post("/agent/connect", json=agent_input("r3").model_dump(mode="json", by_alias=True), headers=owner)
+        )
+        await asyncio.sleep(0.05)
+        gate.set()
+        response, rejoined = await run, await rejoin
+
+    for text_ in (response.text, rejoined.text):
+        assert "Working" in text_
+        assert '"outcome":{"type":"success"}' in text_
+    assert {("run", "eve"), ("connect", "eve"), ("stop", "eve"), ("connect", "felix")} <= set(seen)
+    refused = await collect(agent.run(agent_input("r4")))
+    assert isinstance(refused[-1], RunErrorEvent)
+    assert refused[-1].code == "forbidden"
+
+
+class IdempotentHermes(FakeHermes):
+    """Replays starts by Idempotency-Key and can hold the nth start's response."""
+
+    def __init__(self, *scripts: list[Step]) -> None:
+        super().__init__(*scripts)
+        self.keys: dict[str, str] = {}
+        self.holds = {1: asyncio.Event(), 2: asyncio.Event()}
+        self.posts = 0
+
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or request.url.path != "/v1/runs":
+            return await super().handle(request)
+        self.posts += 1
+        n, key = self.posts, request.headers.get("idempotency-key", "")
+        if key in self.keys:
+            response = httpx.Response(202, json={"run_id": self.keys[key], "status": "started", "replayed": True})
+        else:
+            response = await super().handle(request)
+            self.keys[key] = response.json()["run_id"]
+        if n in self.holds:
+            await self.holds[n].wait()
+        return response
+
+
+async def test_overlapping_retry_never_displaces_a_newer_run() -> None:
+    fake = IdempotentHermes([asyncio.Event()], [asyncio.Event()])
+    agent = make_agent(fake)
+
+    async def owner(run: str) -> bool:
+        record = await agent.store.get("t1")
+        return record is not None and record.run_id == run
+
+    original = asyncio.create_task(collect(agent.run(agent_input())))
+    retry = asyncio.create_task(collect(agent.run(agent_input())))  # its POST answers after r2 took over
+    await until(lambda: fake.posts == 2)
+    fake.holds[1].set()
+    await until(lambda: owner("run_1"))
+    newer = asyncio.create_task(collect(agent.run(agent_input("r2"))))
+    await until(lambda: owner("run_2"))
+    fake.holds[2].set()
+    late = await asyncio.wait_for(retry, 2)
+    assert isinstance(late[-1], RunFinishedEvent)
+    assert late[-1].outcome
+    assert late[-1].outcome.type == "cancelled"
+    assert await owner("run_2")
+    assert not any(path == "/v1/runs/run_2/stop" for _, path, _ in fake.calls)
+    for task in (original, newer):
+        task.cancel()
+
+
+async def test_the_run_that_wins_a_fresh_thread_keeps_its_own_session() -> None:
+    fake = IdempotentHermes([asyncio.Event()], [asyncio.Event()])
+    agent = make_agent(fake)
+
+    async def session(value: str) -> bool:
+        record = await agent.store.get("t1")
+        return record is not None and record.session_id == value
+
+    tasks = [asyncio.create_task(collect(agent.run(agent_input(r)))) for r in ("r1", "r2")]
+    await until(lambda: fake.posts == 2)
+    fake.holds[1].set()
+    await until(lambda: session("run_1"))
+    fake.holds[2].set()  # r2 claims the thread after r1 saved its session
+    await until(lambda: session("run_2"))
+    for task in tasks:
+        task.cancel()
+
+
+class StreamGoneHermes(FakeHermes):
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            return self._error(404, "run_not_found")
+        return await super().handle(request)
+
+
+async def test_polled_approval_can_be_answered() -> None:
+    fake = StreamGoneHermes([
+        {"event": "approval.request", "request_id": "req-1", "command": "ls"},
+        {"event": "run.completed", "output": "done", "completed": True},
+    ])
+    agent = make_agent(fake)
+    first = await collect(agent.run(agent_input()))
+    assert isinstance(first[-1], RunFinishedEvent)
+    assert first[-1].outcome
+    assert first[-1].outcome.type == "interrupt"
+    resume = [ResumeEntry(interrupt_id="req-1", status="resolved", payload="once")]
+    second = await collect(agent.run(agent_input("r2", resume=resume)))
+    assert [path for _, path, _ in fake.calls if path.endswith("/approval")] == ["/v1/runs/run_1/approval"]
+    assert text(second) == "done"
+
+
+class RacingClient(HermesRunsClient):
+    hook: Callable[[], Awaitable[None]] | None = None
+
+    async def get_run(self, run_id: str) -> dict[str, Any]:
+        status = await super().get_run(run_id)
+        if self.hook is not None:
+            hook, self.hook = self.hook, None
+            await hook()
+        return status
+
+
+async def test_rejoin_withdraws_an_approval_another_client_answered() -> None:
+    fake = FakeHermes([
+        {"event": "approval.request", "request_id": "A", "command": "ls"},
+        {"event": "message.delta", "delta": "one"},
+        {"event": "approval.request", "request_id": "B", "command": "rm"},
+        {"event": "run.completed", "output": "one", "completed": True},
+    ])
+    client = RacingClient("http://hermes", "secret", http=httpx.AsyncClient(transport=fake.transport()))
+    agent = HermesAgent(client, poll_interval=0.01)
+    await collect(agent.run(agent_input()))
+
+    async def other_client_answers_a() -> None:  # after the rejoin found A still pending
+        resume = [ResumeEntry(interrupt_id="A", status="resolved", payload="once")]
+        await collect(agent.run(agent_input("r3", resume=resume)))
+
+    client.hook = other_client_answers_a
+    rejoined = await collect(agent.connect(agent_input("r2")))
+    last = rejoined[-1]
+    assert isinstance(last, RunFinishedEvent)
+    assert last.outcome
+    assert last.outcome.type == "interrupt"
+    assert [i.id for i in last.outcome.interrupts] == ["B"]
 
 
 async def test_js_connect_probe_fixture_is_current() -> None:
