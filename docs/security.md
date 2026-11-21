@@ -30,7 +30,7 @@ AG-UI lets the client pick `threadId`. Anyone who knows or guesses a thread id c
 - answer its pending approvals through `resume`.
 
 Pass `authorize`. It runs before `run` (including resumes), `connect` and `stop` touch the
-thread, and before `capabilities` (with an empty `thread_id`, so check only the caller). Check
+thread, and before `capabilities` (with `thread_id=None`, so check only the caller). Check
 that the authenticated user owns `ctx.thread_id`; `ctx.request` is the incoming request. A
 refusal answers HTTP 403 before anything happens. Without `authorize` every request is allowed,
 which only suits a single-user host or one that checks the thread in a route dependency.
@@ -45,7 +45,7 @@ CSRF: if you authenticate with cookies, also require a header a cross-site form 
 ## Approvals
 
 Hermes asks before risky commands. Its choices are `once`, `session`, `always` and `deny`;
-`HermesAgent` accepts only `allowed_choices` (default `once` and `deny`, and `deny` is always
+`HermesAgent` accepts only `ApprovalPolicy.allowed_choices` (default `once` and `deny`, and `deny` is always
 allowed). A client cannot widen that: any other choice is refused with HTTP 400 and nothing is
 sent to Hermes. Add `session` or `always` only if you want users to grant standing permission.
 
@@ -58,38 +58,49 @@ already answered is refused with `invalid_input` (HTTP 400).
 Hermes `instructions` become part of the system prompt for that run. They are built from:
 
 - the `instructions` your `run_body` hook returns: trusted, yours;
-- client system and developer messages: ignored unless you set `client_system_messages=True`,
+- client system and developer messages: ignored unless you set
+  `InputPolicy(client_system_messages=True)`,
   since any client can send them;
 - `context` and `state`: placed as JSON in a `<client_data>` block after a sentence that calls
   it untrusted data, so the model can tell it from your instructions. `<`, `>` and `&` are
   escaped, so the data cannot close the block. Both are on by default; switch them off with
-  `client_context=False` and `client_state=False`. Labelling reduces but does not prevent prompt
+  `InputPolicy(client_context=False, client_state=False)`. Labelling reduces but does not prevent prompt
   injection; treat both as user input.
 
 `forwardedProps` can only set `model`, `provider` or `model_options`, and only the keys you list
-in `forwarded_props` (none by default).
+in `InputPolicy(forwarded_props=...)` (none by default).
 
 ## Images
 
 By default only inline base64 `data:image/...;base64,` images are accepted: up to `max_image_bytes` (5 MiB)
 each and `max_message_image_bytes` (20 MiB) per message. `None` disables a limit. `http(s)`
 image URLs would make Hermes or its model provider fetch a client-chosen URL, so they are
-refused unless you set `allow_image_urls=True`. Everything else, and anything over a limit, is
+refused unless you set `InputPolicy(allow_image_urls=True)`. Everything else, and anything over a limit, is
 refused with `invalid_input` (HTTP 400).
 
 ## Tool output and history
 
-Tool previews and results go to the client as Hermes sends them. Use `tool_filter` to hide or
-rewrite tools whose output the user should not see. It applies to live and replayed runs and
-to the session history `connect` restores. Stored rows keep no preview, so restored calls pass
-the filter with an empty one, and while a filter is set no tool result is restored at all: a
-call your filter hides by its preview cannot leak its result. Restored tool calls always carry
-`"{}"` as arguments.
+Tool previews and results go to the client as Hermes sends them on the live stream: Hermes
+truncates each preview (to 500 characters) and redacts secrets it recognises. Use `tool_filter`
+to hide or rewrite tools whose output the user should not see. It applies to live and replayed
+runs and to the session history `connect` restores. Stored rows keep no preview, so restored
+calls pass the filter with an empty one, and restored tool calls always carry `"{}"` as
+arguments.
+
+Hermes stores tool results whole and unredacted, so the history `connect` restores carries no
+tool results by default. `InputPolicy(restore_tool_results=True)` restores them; each then passes
+`tool_filter` as a `tool.completed` with the full stored content as its preview, so a filter
+that hides a call by its live preview should also check the result.
+
+After a truncated replay, a tool completion whose start was evicted is dropped unless a
+tool-call id ties it to its call, so a hidden call's result never lands on a visible call of the
+same tool.
 
 ## Errors and logs
 
-`RUN_ERROR` and the endpoint's error bodies carry a fixed message and a stable `code`, never
-exception text, Hermes URLs or Hermes error bodies. The cause goes to the `ag_ui_hermes` logger
+`RUN_ERROR` and the endpoint's error bodies carry a fixed message and a stable `code` (and, for
+HTTP 400, a fixed `reason`), never exception text, client data, Hermes URLs or Hermes error
+bodies. The cause goes to the `ag_ui_hermes` logger
 and to `on_error`. Exceptions are logged with `exc_info`, so tracebacks and exception
 messages reach the log verbatim: Hermes error messages, and whatever your store, hooks or
 `state_provider` put into theirs. The adapter itself logs thread ids and Hermes run ids, never

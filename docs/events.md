@@ -1,7 +1,8 @@
 # Event mapping
 
 `HermesTranslator` turns one Hermes run's events into AG-UI events without I/O, so you can feed
-it any Hermes-shaped stream.
+it any Hermes-shaped stream. It is provisional: `HermesAgent` is the stable entry point, and
+the translator's API may change in a minor release.
 
 | Hermes event | AG-UI events |
 | --- | --- |
@@ -18,7 +19,7 @@ it any Hermes-shaped stream.
 | `run.cancelled` | `RUN_FINISHED` cancelled |
 | `run.failed`, `run.interrupted` | `RUN_ERROR` (`code` = status) |
 | `run.steered`, `run.stopping`, `run.waiting_for_approval`, `replay.truncated` | nothing |
-| anything else | `custom_event_mapper`, else `RAW` if `raw_unknown`, `CUSTOM` `hermes.<event>` if `passthrough_unknown`, else dropped |
+| anything else | `custom_event_mapper`, else by `unknown_events`: dropped (`"drop"`, the default), `CUSTOM` `hermes.<event>` (`"custom"`) or `RAW` (`"raw"`) |
 
 Every stream starts with `RUN_STARTED` carrying `protocolVersion`. A terminal run also carries
 `usage` (input, output, total and cache tokens, provider and model) when Hermes reports it.
@@ -39,7 +40,8 @@ same ids:
 
 Once a run's tool events have carried a `tool_call_id` (or `id`), a `tool.completed` pairs with
 its start by that id only; one without an id gets a call of its own. In a run without ids it takes
-the earliest open call of the same tool name.
+the earliest open call of the same tool name. A completion whose start a truncated backlog lost
+is matched by id only, and dropped without one (see [connect](connect.md)).
 
 With a `state_provider`, a final `STATE_DELTA` or `STATE_SNAPSHOT` precedes `RUN_FINISHED` and
 `RUN_ERROR` from a Hermes run end. Errors raised by the adapter itself get none.

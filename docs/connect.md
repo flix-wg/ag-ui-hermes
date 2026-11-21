@@ -24,9 +24,11 @@ load), a `MESSAGES_SNAPSHOT` of the session's stored conversation (`GET
 /api/sessions/{id}/messages`, the latest 500 rows; ids `hermes:msg:<row id>`) comes between them.
 A client that already holds messages keeps them, as on every other path. The restored tool calls
 go through `tool_filter` with an empty preview (stored rows keep none) and their arguments are
-always `"{}"`. Because a filter may hide a call by its preview, no tool result is restored when
-`tool_filter` is set; without one, a result whose call is unknown is omitted. A `RunsClient` without
-`session_messages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
+always `"{}"`. Their results are not restored: Hermes stores them whole and unredacted, while the
+live stream only ever showed a truncated, redacted preview. With
+`InputPolicy(restore_tool_results=True)` the results of restored calls come back too, each passed
+through `tool_filter` as a `tool.completed` whose preview is the stored content. A `RunsClient`
+that does not implement `SupportsSessionMessages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
 streams every event through a fresh translator, then follows the live stream.
 
 If the client holds messages of this Hermes run (their ids start with `<run>:`), the first
@@ -56,7 +58,9 @@ agent checks `GET /v1/runs/{id}`: only a run still `waiting_for_approval` with t
 
 Resuming after an interrupt is different: the client already has everything up to the approval, so
 the agent posts the approval, replays silently up to the interrupt's `seq` to rebuild translator
-state, and emits only newer events. Open subagents are announced again in the new AG-UI run. If
+state, and emits only newer events. The unsequenced `replay.truncated` marker is part of that
+silent replay, so the new AG-UI run opens only after it, and open subagents are announced again
+in it. If
 the resume left a pending approval unanswered and `GET /v1/runs/{id}` still says
 `waiting_for_approval` with that approval's `request_id`, the replay stops at the interrupt and
 ends the run with it again: Hermes never repeats an `approval.request` on the live stream, so
@@ -74,10 +78,11 @@ client last saw it). The text segment whose first delta was evicted has an unkno
 streamed under an invented one; the next tool call, reasoning or interim message restores normal
 ids. `run.completed` then sends a `MESSAGES_SNAPSHOT` that puts the canonical `output` in place of
 the stale text and corrects held messages whose text changed, keeping held tool calls and results
-the replay did not rebuild. A tool completion whose start was evicted attaches only when the client
-holds exactly one unfinished call started before the backlog that it can own: the one with its
-`tool_call_id` in a run that carries ids (see [events](events.md)), else the one of its tool.
-Otherwise it is dropped, never put on a call it may not belong to. An approval after truncation is never
+the replay did not rebuild. A tool completion whose start was evicted attaches only by id: in a run
+that carries tool-call ids (see [events](events.md)), to the one unfinished call the client holds
+with that id that started before the backlog. Without an id it is dropped, never put on a call it
+may not belong to: the visible call of the same tool might have finished in the evicted part, and
+the completion belong to a later hidden call. An approval after truncation is never
 bound to a tool call.
 
 If the stream is gone (Hermes sweeps an unsubscribed run's stream after about five minutes), the

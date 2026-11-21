@@ -21,57 +21,71 @@ HermesRunsClient(base_url, api_key=None, *, headers=None, http=None, timeout=30.
 Use it as an async context manager or call `aclose()`, for example in a FastAPI lifespan.
 
 `HermesAgent` only needs the `RunsClient` protocol (`start_run`, `get_run`, `stop_run`,
-`respond_approval`, `events`, and optionally `session_messages` and `get_capabilities`), so a
-host can back it with its own bridge. The protocol's docstring in
-[`client.py`](../src/ag_ui_hermes/client.py) gives the error contract.
+`respond_approval`, `events`), so a host can back it with its own bridge. A bridge that also
+implements `SupportsSessionMessages` (`session_messages`) lets `connect` restore history, and
+one that implements `SupportsCapabilities` (`get_capabilities`) adds what Hermes reports to
+the capabilities; the agent checks both with `isinstance`. The protocols' docstrings in
+[`client.py`](../src/ag_ui_hermes/client.py) give the error contract.
 
 ## `HermesAgent`
 
 ```python
 HermesAgent(client, *, store=None, authorize=None, tool_filter=None, custom_event_mapper=None,
-            passthrough_unknown=False, raw_unknown=False, state_provider=None,
-            state_refresh_tools=(), run_body=None, on_error=None, poll_interval=1.0,
-            poll_timeout=1800.0, allowed_choices=("once", "deny"), approval_timeout=None,
-            forwarded_props=(), client_system_messages=False, client_context=True,
-            client_state=True, allow_image_urls=False, max_image_bytes=5 * 2**20,
-            max_message_image_bytes=20 * 2**20)
+            unknown_events="drop", state_provider=None, state_refresh_tools=(), run_body=None,
+            on_error=None, poll_interval=1.0, poll_timeout=1800.0,
+            inputs=InputPolicy(), approvals=ApprovalPolicy())
 ```
+
+Every hook may be a plain function or a coroutine function; the agent awaits a result that is
+awaitable. The hook types (`Authorize`, `ToolFilter`, `StateProvider`, `RunBody`,
+`CustomEventMapper`, `OnError`) are exported from `ag_ui_hermes`.
 
 | Option | Default | |
 | --- | --- | --- |
 | `store` | `InMemoryThreadStore()` | See [Thread store](#thread-store). |
-| `authorize` | none | `async (ctx) -> bool`. See [security.md](security.md). |
-| `tool_filter` | none | `(ctx, tool, preview, event) -> (tool, preview) \| None`. Called on `tool.started` (`None` hides the whole call) and on `tool.completed` (`None` hides only the result). Restored session history passes calls with an empty preview and restores no results while a filter is set. |
-| `custom_event_mapper` | none | `(ctx, event) -> list[BaseEvent] \| None` for Hermes events the translator does not know. `None` falls through. |
-| `passthrough_unknown` | `False` | Forward unknown Hermes events as `CUSTOM` named `hermes.<event>`. |
-| `raw_unknown` | `False` | Forward unknown Hermes events as `RAW` with `source="hermes"`. |
-| `state_provider` | none | `async (ctx) -> state`. `None` sends nothing. |
+| `authorize` | none | `(ctx) -> bool`. See [security.md](security.md). |
+| `tool_filter` | none | `(ctx, tool, preview, event) -> (tool, preview) \| None`. Called on every `tool.started` (`None` hides the whole call) and `tool.completed` (`None` hides only the result), so keep it cheap. Restored session history passes calls with an empty preview, and results (only with `restore_tool_results`) as a `tool.completed` with the stored content as preview. |
+| `custom_event_mapper` | none | `(ctx, event) -> list[BaseEvent] \| None` for Hermes events the translator does not know. `None` falls through to `unknown_events`. |
+| `unknown_events` | `"drop"` | Hermes events nothing maps: `"drop"`, `"custom"` (`CUSTOM` named `hermes.<event>`) or `"raw"` (`RAW` with `source="hermes"`). |
+| `state_provider` | none | `(ctx) -> state`. `None` sends nothing. |
 | `state_refresh_tools` | `()` | Tool names after whose completion the state is read again. |
 | `run_body` | none | `(ctx) -> dict` of extra `POST /v1/runs` fields. |
 | `on_error` | none | `(ctx, exc) -> None`. Sees every error the agent reports. Its own exceptions are logged and ignored. |
 | `poll_interval` | `1.0` | Seconds between status polls when the event stream is gone. |
 | `poll_timeout` | `1800.0` | Seconds of polling before failing with `hermes_timeout`. Also bounds a single status call that stalls. `None` polls and waits forever. |
-| `allowed_choices` | `("once", "deny")` | Approval choices a client may send. `deny` is always allowed. |
-| `approval_timeout` | `None` | Seconds Hermes waits on an approval. When set, interrupts carry `expiresAt`. |
-| `forwarded_props` | `()` | `forwardedProps` keys a client may set: any of `model`, `provider`, `model_options`. |
+| `inputs` | `InputPolicy()` | What a client's request may put into a run, below. |
+| `approvals` | `ApprovalPolicy()` | Which approval choices a client may send, below. |
+
+### `InputPolicy`
+
+A frozen dataclass; change one field with `dataclasses.replace`.
+
+| Field | Default | |
+| --- | --- | --- |
 | `client_system_messages` | `False` | Add the client's system and developer messages to the Hermes instructions. Ignored otherwise. |
 | `client_context` | `True` | Pass the client's `context` to the instructions as data. |
 | `client_state` | `True` | Pass the client's `state` to the instructions as data. |
 | `allow_image_urls` | `False` | Accept `http(s)` image URLs, which Hermes fetches. Only inline `data:` images otherwise. |
 | `max_image_bytes` | 5 MiB | Largest decoded inline image. `None` disables the limit. |
 | `max_message_image_bytes` | 20 MiB | Largest total of decoded inline images in one message. `None` disables the limit. |
+| `forwarded_props` | none | `forwardedProps` keys a client may set: any of `model`, `provider`, `model_options`. Any other key raises `ValueError`. |
+| `restore_tool_results` | `False` | Restore stored tool results when `connect` restores a session's history. Stored results are whole and unredacted, unlike the live previews (at most 500 characters, with secrets redacted by Hermes), so they stay out by default. |
 
-Type aliases for every hook (`Authorize`, `ToolFilter`, `StateProvider`, ...) live in
-`ag_ui_hermes.agent`.
+### `ApprovalPolicy`
+
+| Field | Default | |
+| --- | --- | --- |
+| `allowed_choices` | `once`, `deny` | Approval choices a client may send. `deny` is always allowed. |
+| `timeout` | `None` | Seconds Hermes waits on an approval. When set, interrupts carry `expiresAt`. |
 
 ### `HookContext`
 
 | Field | |
 | --- | --- |
 | `action` | `"run"`, `"connect"`, `"stop"` or `"capabilities"`. |
-| `thread_id`, `run_id` | From the request. Both empty for `"capabilities"`. |
+| `thread_id`, `run_id` | From the request. Both `None` for `"capabilities"`. |
 | `input` | The `RunAgentInput`. `None` for `"stop"` and `"capabilities"`. |
-| `request` | The Starlette `Request` from the endpoint, or what you pass as `request=` to `run`, `connect`, `open_run`, `open_connect`, `stop` and `capabilities`. |
+| `request` | The Starlette `Request` from the endpoint, or what you pass as `request=` to `run`, `connect`, `open_run`, `open_connect`, `stop` and `capabilities`. Typed as `RequestLike` (`headers`, `client`, `url`), so FastAPI stays optional. |
 
 ### Calling the agent directly
 
@@ -83,6 +97,30 @@ Type aliases for every hook (`Authorize`, `ToolFilter`, `StateProvider`, ...) li
 - `stop(thread_id, run_id)` returns whether the AG-UI run owned the thread's Hermes run.
 - `capabilities()` returns `AgentCapabilities`.
 
+### Errors
+
+`invalid_input` (`AgentInputError`) always comes with a fixed `reason` that never echoes
+client data:
+
+| `reason` | |
+| --- | --- |
+| `malformed_body` | The endpoint could not parse the body as JSON of the right shape (`RunAgentInput`, or `{threadId, runId}` for `/stop`). |
+| `no_user_message` | No user message with content to send. |
+| `unsupported_media` | An audio, video or document part, or an image source that is not allowed (an `http(s)` URL without `allow_image_urls`, a non-image or non-base64 data URL). |
+| `invalid_image` | Inline image data that is not base64. |
+| `image_too_large` | An image over `max_image_bytes`, or a message's images over `max_message_image_bytes`. |
+| `bad_forwarded_props` | An allowed `forwardedProps` value of the wrong type. |
+| `bad_choice` | An approval choice outside `allowed_choices`, or two answers for one interrupt. |
+| `unknown_interrupt` | A resume naming an interrupt the thread neither waits on nor has answered, or a resume on a thread without an interrupted run. |
+| `stale_resume` | The thread moved on to a newer run between validating the resume and streaming it. |
+
+The endpoint answers it before streaming as HTTP 400 with
+`{"error": {"code": "invalid_input", "message", "reason"}}`, the `message` being fixed per
+reason. `stale_resume` only happens once the stream has started, and `run()` and `connect()`
+never answer with HTTP: there it ends the stream as `RUN_ERROR` with `code: "invalid_input"`
+and the same message, and the reason is on the exception passed to `on_error`
+(`exc.reason`) and in the log.
+
 ## Run input
 
 How a `RunAgentInput` becomes a `POST /v1/runs` body:
@@ -92,7 +130,7 @@ How a `RunAgentInput` becomes a `POST /v1/runs` body:
   document parts are refused with `invalid_input`.
   Images are accepted as inline base64 data (`data:image/...;base64,`). Each may be up to `max_image_bytes`
   (default 5 MiB) and one message's images up to `max_message_image_bytes` (default 20 MiB);
-  `None` disables a limit. `http(s)` image URLs are refused unless `allow_image_urls=True`,
+  `None` disables a limit. `http(s)` image URLs are refused unless `InputPolicy(allow_image_urls=True)`,
   because Hermes would fetch them. Anything else, inline data that is not base64, or an image over a limit, is `invalid_input`
   (HTTP 400).
 - **History.** Only the last user message is sent; the Hermes session holds the rest. When the
@@ -110,7 +148,7 @@ How a `RunAgentInput` becomes a `POST /v1/runs` body:
     `client_state=False`. Empty `context` and `state` add nothing.
 
   A change from one run to the next, such as a new state, costs a prompt-cache miss.
-- **Forwarded props.** `forwarded_props={"model"}` (any subset of `model`, `provider`,
+- **Forwarded props.** `InputPolicy(forwarded_props={"model"})` (any subset of `model`, `provider`,
   `model_options`) lets a client set those fields through `forwardedProps`. A wrongly typed
   value is `invalid_input`, and `run_body` fields win. Hermes refuses a model that conflicts
   with a session's model lock (`hermes_rejected`).
@@ -128,8 +166,8 @@ A Hermes `approval.request` ends the AG-UI run with `RUN_FINISHED`, outcome `int
 | `id` | The Hermes `request_id`. |
 | `reason` | `"tool_call"` with `toolCallId` when exactly one visible tool call is open (and matches the approval's `tool`, if named) and the backlog was not truncated. Otherwise `"confirmation"`. |
 | `message` | Description and command. |
-| `responseSchema` | `{"choice": enum}` of the choices Hermes offers and `allowed_choices` permits. |
-| `expiresAt` | Only when `approval_timeout` is set. |
+| `responseSchema` | `{"choice": enum}` of the choices Hermes offers and `ApprovalPolicy.allowed_choices` permits. |
+| `expiresAt` | Only when `ApprovalPolicy.timeout` is set. |
 | `metadata` | `command`, `description`, `pattern_key`, `pattern_keys`, `choices`, `smart_denied` as Hermes sends them, and `hermesRunId`. |
 
 Resume with a new run on the same thread whose `resume` answers it:
@@ -168,9 +206,9 @@ state snapshots and deltas.
 ## Thread store
 
 A store maps an AG-UI thread to its Hermes session and its current Hermes run. It implements
-`get(thread_id)` and `put_if_run(thread_id, record, run_id)`.
+`get(thread_id)` and `compare_and_set(thread_id, record, run_id)`.
 
-`put_if_run` must be an atomic compare-and-set: write only if the stored record still owns
+`compare_and_set` must be atomic: write only if the stored record still owns
 Hermes run `run_id` and still has the `version` the caller read, and store it with `version + 1`.
 A missing record counts as `ThreadRecord()` (`run_id=None`, `version=0`). This keeps a finished
 stream from releasing a newer run, and two workers on the same thread from losing each other's
