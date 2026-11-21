@@ -9,11 +9,32 @@ authors = [
     { name = "Felix Wegener", email = "120452252+flix-wg@users.noreply.github.com" }
 ]
 requires-python = ">=3.11"
-keywords = ["ag-ui", "hermes", "agent", "sse"]
+keywords = ["ag-ui", "ag-ui-protocol", "hermes", "hermes-agent", "agent", "sse", "fastapi", "adapter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "ag-ui-protocol>=1.0.0,<2",
     "httpx>=0.27",
 ]
+
+[project.urls]
+Homepage = "https://github.com/flix-wg/ag-ui-hermes"
+Repository = "https://github.com/flix-wg/ag-ui-hermes"
+Issues = "https://github.com/flix-wg/ag-ui-hermes/issues"
+Changelog = "https://github.com/flix-wg/ag-ui-hermes/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.110"]
@@ -24,11 +45,16 @@ dev = [
     "mypy>=1.13",
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "ruff>=0.8",
 ]
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# py.typed lives in the module directory and is included automatically.
+source-include = ["tests/**", "docs/**", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -38,3 +64,14 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C4", "PT", "ASYNC", "PERF", "TC", "PIE", "RET"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ag_ui_hermes"]
