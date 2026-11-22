@@ -93,6 +93,8 @@ class InMemoryThreadStore:
             idle = [k for k, r in self._records.items() if r.run_id is None and k != thread_id][:excess]
             for key in idle:
                 del self._records[key]
+            if len(self._records) > self.max_threads and stored.run_id is None:
+                del self._records[thread_id]
         over = len(self._records) > self.max_threads
         if over and not self._over:
             logger.warning("InMemoryThreadStore holds %d threads with live runs, more than max_threads=%d", len(self._records), self.max_threads)

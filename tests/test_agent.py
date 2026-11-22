@@ -959,5 +959,22 @@ async def test_a_finished_run_releases_its_thread_even_if_its_stream_ends_early(
     assert await owner() is None
 
 
+async def test_a_finished_run_brings_an_overflowing_store_back_to_capacity() -> None:
+    store = InMemoryThreadStore(max_threads=1)
+    assert await store.compare_and_set("other-thread", ThreadRecord(run_id="other-run"), None)
+    fake = FakeHermes([{"event": "run.completed", "output": "ok", "completed": True}])
+    agent = make_agent(fake)
+    agent.store = store
+
+    request = agent_input()
+    events = await collect(agent.run(request))
+
+    assert isinstance(events[-1], RunFinishedEvent)
+    assert await store.get(request.thread_id) is None
+    other = await store.get("other-thread")
+    assert other is not None
+    assert other.run_id == "other-run"
+
+
 async def test_js_connect_probe_fixture_is_current() -> None:
     assert await connect_cases.build() == json.loads(connect_cases.FIXTURE.read_text())

@@ -1,78 +1,55 @@
 # ag-ui-hermes
 
-[AG-UI](https://docs.ag-ui.com) agent for a [Hermes Agent](https://github.com/NousResearch/hermes-agent)
-endpoint served by the Python package `ag-ui-hermes`. `HermesAgent` extends `HttpAgent` from
-`@ag-ui/client` and adds `connect()` (rejoin a run in flight), `abortRun()` (stop the run on the
-server), `getHeaders` and `getCapabilities()`.
+An [AG-UI](https://docs.ag-ui.com) `HttpAgent` for a
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) endpoint served by the
+[Python adapter](../README.md). It supports reconnecting to runs, stopping them
+server-side, sending dynamic headers, and fetching capabilities.
+
+*AI-driven project built with Claude, Codex, and Gemini.*
 
 ## Install
 
-```bash
-npm install ag-ui-hermes
+```sh
+npm install ag-ui-hermes  # once published
 ```
 
-Peer dependencies: `@ag-ui/client` `~1.0.3` (tested with 1.0.3 and 1.0.4; the agent uses protected
-`HttpAgent` internals, so minor versions are not allowed) and `rxjs` `^7.8.0`. Node >= 22. ESM and CJS.
+The package ships ESM and CommonJS for Node.js 22+. It has two peer dependencies,
+`@ag-ui/client` (`~1.0.3`, tested with 1.0.3 and 1.0.4) and `rxjs` (`^7.8.0`).
+To build from this directory, run `npm ci && npm run build` with Node.js 22.18+ on
+Node 22, 24.11+ on Node 24, or 26+.
 
 ## Usage with assistant-ui
 
 ```tsx
-import { HermesAgent } from "ag-ui-hermes";
-import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
+import type { PropsWithChildren } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
+import { HermesAgent } from "ag-ui-hermes";
 
-const agent = new HermesAgent({
-  url: "/agent",
-  getHeaders: () => ({ "X-CSRF-Token": readCsrfToken() }),
-});
+const agent = new HermesAgent({ url: "/agent" });
 
-export function Chat() {
+export function Chat({ children }: PropsWithChildren) {
   const runtime = useAgUiRuntime({ agent });
-  return <AssistantRuntimeProvider runtime={runtime}>{/* thread UI */}</AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>;
 }
 ```
 
+The [FastAPI + assistant-ui example](../examples/fastapi-assistant-ui/README.md)
+adds a thread UI with approvals, reconnect, and demo authentication.
+
 ## Options
 
-| Option | Default | |
+| Option | Default | Purpose |
 | --- | --- | --- |
-| `url` | required | Run endpoint (`POST`). |
+| `url` | Required | Run endpoint. |
 | `connectUrl` | `<url>/connect` | Rejoin endpoint. |
 | `stopUrl` | `<url>/stop` | Stop endpoint. |
-| `headers` | `{}` | Static headers (from `HttpAgent`). |
-| `getHeaders` | none | Called before every request; its result overrides `headers`. |
+| `headers` | `{}` | Static request headers. |
+| `getHeaders` | Omitted | Sync or async callback called once per request. Returned headers override static headers with the same keys. |
 
-### `getHeaders` and CSRF
+The runtime can call `connectAgent()` to rejoin a live run. Leaving a thread detaches
+the stream and lets the run continue. `abortRun()` also sends a best-effort stop
+request for the current run. See [reconnect and stop](../docs/connect.md).
 
-`getHeaders` may be sync or async (`() => Record<string, string> | Promise<Record<string, string>>`),
-so you can refresh a token first. It is applied to every request the agent makes: run, connect,
-stop and capabilities. It is called once per request, so keep it cheap and cache the token.
-
-## Connect, reconnect and stop
-
-- Leaving a thread or closing the tab only detaches. The Hermes run keeps going on the server.
-- `connect()` (called by `useAgUiRuntime` when a thread loads) rejoins the run by replaying it
-  from the start. Messages the client already holds are sent along, and the server replaces
-  them with the replay under the same ids, so nothing is duplicated.
-- `abortRun()` is an explicit cancel. It posts `{ threadId, runId }` to `stopUrl`, naming the last
-  run or connect of this agent so a late stop cannot cancel a newer run, then aborts the local
-  request. Before the first run or connect nothing is posted. The stop is best effort: failures
-  are swallowed.
-
-## Capabilities
-
-```ts
-const capabilities = await agent.getCapabilities(); // GET <url>/capabilities
-```
-
-Returns the AG-UI `AgentCapabilities` object served by the endpoint. It rejects on a non-2xx
-response.
-
-## Example
-
-[`examples/fastapi-assistant-ui`](https://github.com/flix-wg/ag-ui-hermes/tree/main/examples/fastapi-assistant-ui) is a complete chat with approvals
-and reconnect.
-
-## License
-
-MIT
+`getCapabilities()` fetches `GET <url>/capabilities` and returns `AgentCapabilities`.
+It rejects on a non-2xx response.

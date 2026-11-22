@@ -26,6 +26,10 @@ First release.
 - npm package `ag-ui-hermes`: `HermesAgent` (an `HttpAgent`) with `connect()`, server-side `abortRun()`, async `getHeaders` and `getCapabilities()`.
 - Example: FastAPI server and assistant-ui chat, runnable against a fake Hermes.
 
+### Fixed
+
+- `InMemoryThreadStore` evicts a newly idle thread when active runs have pushed the store past `max_threads` and no older idle thread can be evicted to restore the cap.
+
 ### Security
 
 - `authorize` hook before every run, resume, connect, stop and capabilities request; refusals answer HTTP 403.

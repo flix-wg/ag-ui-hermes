@@ -99,6 +99,25 @@ A frozen dataclass; change one field with `dataclasses.replace`.
 
 ### Errors
 
+The FastAPI endpoint returns HTTP 400 for invalid input, 403 for denied access, and 502 for
+upstream errors on stop and capabilities requests. Its error bodies have the shape
+`{"error": {"code": "...", "message": "..."}}`. Once streaming begins, the adapter reports
+failures with `RUN_ERROR`. These are the standard error codes.
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_input` | The request failed validation. See the reasons below. |
+| `forbidden` | The `authorize` hook denied the request. |
+| `hermes_unreachable` | A transport failure prevented a request to Hermes. |
+| `hermes_rejected` | Hermes returned an error status. |
+| `hermes_bad_response` | Hermes returned JSON or data in an unexpected format. |
+| `hermes_timeout` | Polling for the run exceeded `poll_timeout`. |
+| `store_conflict` | The thread store kept refusing compare-and-set writes. |
+| `internal_error` | An unexpected exception occurred in the adapter, store, or a hook. |
+| `failed`, `interrupted` | The Hermes run ended with that status. |
+
+See [security and logs](security.md#errors-and-logs) for server-side diagnostics.
+
 `invalid_input` (`AgentInputError`) always comes with a fixed `reason` that never echoes
 client data:
 
@@ -199,8 +218,8 @@ With a `state_provider`, each stream (run, resume or connect) opens with a `STAT
 After a tool in `state_refresh_tools` completes, and once more just before the run's
 `RUN_FINISHED` or `RUN_ERROR`, the state is read again: a `STATE_DELTA` (RFC 6902 JSON Patch
 against the last state sent in that stream) when both states are JSON objects, nothing when it
-did not change, and a new snapshot otherwise. A run that ends in an adapter-side error (see the
-`RUN_ERROR` codes in the README) gets no final state. Capabilities then report
+did not change, and a new snapshot otherwise. A run that ends in an [adapter-side error](#errors)
+gets no final state. Capabilities then report
 state snapshots and deltas.
 
 ## Thread store
@@ -219,8 +238,8 @@ writes; the agent re-reads and retries, and fails with `store_conflict` after 50
 `InMemoryThreadStore(max_threads=10_000)` lives in one process and evicts the least recently
 used threads without a Hermes run when full. A record with a live run is never evicted, since
 its run would lose its stop and approval mapping. When every record is live, the store grows
-past `max_threads` and logs a warning. Use a shared store (Redis, a database) when you run
-several workers.
+past `max_threads` and logs a warning. As runs finish, idle records are evicted until the store
+is back at capacity. Use a shared store (Redis, a database) when you run several workers.
 
 The record keeps the last 32 started AG-UI runs per thread, so a late transport retry still
 finds its Hermes run.

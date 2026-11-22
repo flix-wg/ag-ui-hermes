@@ -10,13 +10,13 @@ A minimal chat in front of a Hermes Agent: streaming text, tool calls, approval 
 - `web/`: Vite + React + `@assistant-ui/react` + `@assistant-ui/react-ag-ui`, using the local
   `js/` package.
 
-Needs [uv](https://docs.astral.sh/uv/), Node 22.18+ (or 24.11+, as the `js/` build tool needs) and npm. Run everything from this
-directory.
+Use Python 3.11+ with [uv](https://docs.astral.sh/uv/) and Node.js 22.18+ on Node 22,
+24.11+ on Node 24, or 26+ with npm. Run `make install` from this directory before
+starting either mode.
 
 ## Demo without Hermes
 
 ```bash
-make install
 make demo
 ```
 
@@ -28,18 +28,20 @@ if you deny. The fake Hermes listens on 8642 and the server on 8000; override th
 ## Against a real Hermes
 
 Start the Hermes API server (see the
-[Hermes API server docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)),
-then in two terminals:
+[Hermes API server docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)).
+Set `API_SERVER_KEY` in your shell to the key configured in Hermes, then run these
+commands in separate terminals.
 
 ```bash
-HERMES_URL=http://127.0.0.1:8642 HERMES_API_KEY=<API_SERVER_KEY> make server
+HERMES_URL=http://127.0.0.1:8642 HERMES_API_KEY="${API_SERVER_KEY:?Set the Hermes API key}" make server
 make web
 ```
 
 ## What to try
 
-- **Approvals.** Ask for something that runs a command Hermes asks about. The approval card
-  sends `{"approved": true}` (Hermes choice `once`) or `{"approved": false}` (`deny`).
+- **Approvals.** In demo mode, send any message to trigger an approval. With real Hermes, the
+  card appears when a command requires approval. It sends `{"approved": true}` (Hermes choice
+  `once`) or `{"approved": false}` (`deny`).
 - **Reconnect.** Reload the page while a run streams or waits for approval. The thread id is
   kept in `localStorage`, and the history adapter in `web/src/App.tsx` asks the runtime to
   resume, so it calls `connect()` and the server replays the run. A finished thread is restored

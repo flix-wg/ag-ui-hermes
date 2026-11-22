@@ -2,7 +2,8 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately to security@example.invalid (placeholder, to be replaced before release). Do not open a public issue. Expect an acknowledgement within a few days.
+Report vulnerabilities through [GitHub Security Advisories](https://github.com/flix-wg/ag-ui-hermes/security/advisories/new)
+or contact the maintainer privately. Please keep vulnerability reports out of public issues.
 
 ## Scope
 

@@ -24,6 +24,15 @@ the translator's API may change in a minor release.
 Every stream starts with `RUN_STARTED` carrying `protocolVersion`. A terminal run also carries
 `usage` (input, output, total and cache tokens, provider and model) when Hermes reports it.
 
+## Limitations
+
+- Hermes executes all tools on the server. Tool arguments appear as `{}` because Hermes tool
+  events omit them. Without tool IDs, parallel calls of the same tool can pair incorrectly if
+  they complete out of order.
+- Hermes sends reasoning in complete blocks. The adapter emits no `ACTIVITY_*` or `STEP_*` events.
+- Token usage covers the whole Hermes run, including every resume. The AG-UI run that sees it
+  end reports the total.
+
 ## Ids
 
 Ids derive from the Hermes run id and the event `seq`, so replaying a run from seq 0 gives the

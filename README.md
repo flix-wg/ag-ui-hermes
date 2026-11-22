@@ -1,241 +1,77 @@
 # ag-ui-hermes
 
-Exposes a [Hermes Agent](https://github.com/NousResearch/hermes-agent) API server as an
-[AG-UI](https://docs.ag-ui.com) 1.0 agent. It runs outside the Hermes process and uses the
-existing `/v1/runs` HTTP API, so any AG-UI frontend, such as assistant-ui with
-`@assistant-ui/react-ag-ui`, can drive Hermes.
+Connect a [Hermes Agent](https://github.com/NousResearch/hermes-agent) server to an
+[AG-UI](https://docs.ag-ui.com) 1.0 frontend. The Python adapter runs alongside Hermes
+and uses its `/v1/runs` HTTP API. The [JavaScript client](js/README.md) works with assistant-ui
+and other `@ag-ui/client` consumers.
 
-It has two parts:
-
-- the Python package `ag-ui-hermes`: `HermesAgent`, `HermesRunsClient`, the pure
-  `HermesTranslator` and a FastAPI endpoint;
-- the npm package `ag-ui-hermes` in [`js/`](https://github.com/flix-wg/ag-ui-hermes/blob/main/js/README.md): a `HermesAgent` that extends
-  `HttpAgent` from `@ag-ui/client` with `connect()`, a server-side stop and dynamic headers.
-
-## Features
-
-| Feature | AG-UI |
-| --- | --- |
-| Streaming text | `TEXT_MESSAGE_START/CONTENT/END` |
-| Server-side tool calls and results | `TOOL_CALL_START/END`, `TOOL_CALL_RESULT` |
-| Reasoning, as one block per Hermes reasoning event | `REASONING_START`, `REASONING_MESSAGE_*`, `REASONING_END` |
-| Delegated subagents | `SUBAGENT_STARTED/FINISHED/ERROR` |
-| Command approvals | `RUN_FINISHED` with an `interrupt` outcome, answered through `resume` |
-| Rejoining a run after a reload or thread switch | `connect`, `MESSAGES_SNAPSHOT` |
-| Host state | `STATE_SNAPSHOT`, `STATE_DELTA` |
-| Image input | `image` input parts |
-| Token usage of the Hermes run | `usage` on `RUN_FINISHED` / `RUN_ERROR` |
-| Capabilities | `GET <path>/capabilities`, `AgentCapabilities` |
-
-The full event table is in [docs/events.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/events.md).
-
-## Install
-
-```bash
-pip install "ag-ui-hermes[fastapi]"   # server; drop [fastapi] to use the agent without the endpoint
-npm install ag-ui-hermes              # frontend agent, with @ag-ui/client as a peer
-```
-
-To try unreleased changes, install from source:
-
-```bash
-pip install "ag-ui-hermes[fastapi] @ git+https://github.com/flix-wg/ag-ui-hermes"
-```
-
-and build the JS package from `js/` (see [js/README.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/js/README.md)).
+*AI-driven project built with Claude, Codex, and Gemini.*
 
 ## Quickstart
 
-You need a running Hermes API server and its `API_SERVER_KEY`.
+Try the [FastAPI + assistant-ui example](examples/fastapi-assistant-ui/README.md) with
+a fake Hermes and no API key. With Python 3.11+, uv, and a supported Node version, run
+these commands from the repository root.
 
-```python
-# app.py
-import os
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-
-from ag_ui_hermes import HermesAgent, HermesRunsClient, HookContext
-from ag_ui_hermes.endpoint import add_hermes_fastapi_endpoint
-
-client = HermesRunsClient("http://127.0.0.1:8642", api_key=os.environ["HERMES_API_KEY"])
-owners: dict[str, str] = {}  # thread id -> user; use your database
-
-
-def authorize(ctx: HookContext) -> bool:
-    # The frontend below sends X-User. Replace both with your real authentication.
-    user = ctx.request.headers.get("x-user") if ctx.request else None
-    if not user:
-        return False
-    if ctx.thread_id is None:  # capabilities concern no thread
-        return True
-    return owners.setdefault(ctx.thread_id, user) == user
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    await client.aclose()
-
-
-app = FastAPI(lifespan=lifespan)
-add_hermes_fastapi_endpoint(app, HermesAgent(client, authorize=authorize), "/agent")
+```sh
+cd examples/fastapi-assistant-ui
+make install
+make demo
 ```
 
-```bash
-pip install uvicorn
-HERMES_API_KEY=... uvicorn app:app --port 8000
+Open `http://localhost:5173` to try streaming chat, approvals, and reconnecting.
+
+## Install
+
+Once the packages are published, install the FastAPI adapter and the JavaScript client.
+
+```sh
+pip install "ag-ui-hermes[fastapi]"
+npm install ag-ui-hermes
 ```
 
-This registers four routes:
+From a checkout, run `uv sync --all-extras` and `(cd js && npm ci && npm run build)`.
+The Python package can also be installed from the checkout with
+`pip install ".[fastapi]"`. The `fastapi` extra is optional for custom HTTP routes.
 
-| Route | |
+## Connect your app
+
+On your server, create a `HermesRunsClient` with the Hermes API URL and its
+`API_SERVER_KEY`. Pass it to `HermesAgent` with an `authorize` hook that checks the
+caller and thread ownership. Keep the key server-side and close the client on shutdown.
+See the [example server](examples/fastapi-assistant-ui/server/app.py) and the
+[security guide](docs/security.md).
+
+Register `add_hermes_fastapi_endpoint(app, agent, "/agent")` from
+`ag_ui_hermes.endpoint`. Point the [JavaScript agent](js/README.md#usage-with-assistant-ui)
+at `/agent`.
+
+| Route | Behavior |
 | --- | --- |
-| `POST /agent` | Start a run, or resume one after an interrupt. SSE response. |
-| `POST /agent/connect` | Rejoin the thread's run. SSE response. |
-| `POST /agent/stop` | `{"threadId", "runId"}`: stop the Hermes run if that AG-UI run owns it. Answers `{"stopped": bool}`. |
-| `GET /agent/capabilities` | AG-UI `AgentCapabilities`. |
+| `POST /agent` | Stream a new run or resume after an approval. |
+| `POST /agent/connect` | Rejoin a live run or restore session history. |
+| `POST /agent/stop` | Stop the run owned by the supplied `threadId` and `runId`. |
+| `GET /agent/capabilities` | Return AG-UI `AgentCapabilities`. |
 
-Extra keyword arguments to `add_hermes_fastapi_endpoint` (`dependencies`, `tags`, ...) go to
-every route. Without FastAPI, call `HermesAgent.open_run` / `open_connect` / `stop` /
-`capabilities` from your own routes.
-
-[examples/fastapi-assistant-ui](https://github.com/flix-wg/ag-ui-hermes/tree/main/examples/fastapi-assistant-ui) is a complete server and chat UI
-that also runs against a fake Hermes.
-
-## Frontend
-
-```tsx
-import { AssistantRuntimeProvider } from "@assistant-ui/react";
-import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
-import { HermesAgent } from "ag-ui-hermes";
-
-const agent = new HermesAgent({
-  url: "/agent",
-  // The header the server's authorize hook checks. Replace both with your real authentication.
-  getHeaders: async () => ({ "X-User": "demo-user" }),
-});
-
-export function Chat() {
-  const runtime = useAgUiRuntime({ agent });
-  return <AssistantRuntimeProvider runtime={runtime}>{/* thread UI */}</AssistantRuntimeProvider>;
-}
-```
-
-Approvals arrive as interrupts: read them with `useAgUiInterrupts()` and answer with
-`useAgUiSubmitInterruptResponses()`, for example
-`[{ interruptId, status: "resolved", payload: { approved: true } }]`. See
-[docs/configuration.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/configuration.md#approvals) for the accepted payloads.
-
-## Configuration and hooks
-
-```python
-HermesAgent(
-    client,
-    authorize=authorize,
-    inputs=InputPolicy(forwarded_props={"model"}, allow_image_urls=False),
-    approvals=ApprovalPolicy(allowed_choices={"once", "session", "deny"}, timeout=300),
-)
-```
-
-Every hook may be sync or async and gets a `HookContext` first, with `action` (`"run"`,
-`"connect"`, `"stop"` or `"capabilities"`), `thread_id` and `run_id` (`None` for
-`"capabilities"`), `input` (the `RunAgentInput`) and `request` (the Starlette `Request` from
-the endpoint).
-
-| Option | Default | |
-| --- | --- | --- |
-| `authorize` | none (allow all) | `(ctx) -> bool`; `False` refuses with HTTP 403. |
-| `store` | `InMemoryThreadStore()` | Thread to Hermes session/run mapping. Use a shared store for several workers. |
-| `tool_filter` | none | Rename, rewrite or hide tool calls and results. |
-| `state_provider` | none | `(ctx) -> state`, sent as `STATE_SNAPSHOT` at the start of each stream and refreshed before the run ends. |
-| `state_refresh_tools` | `()` | Tools after which the state is read again and sent as `STATE_DELTA`. |
-| `run_body` | none | Extra `POST /v1/runs` body fields, such as `instructions`. |
-| `custom_event_mapper`, `unknown_events` | none, `"drop"` | Map Hermes events the adapter does not know, or forward them as `"custom"` or `"raw"`. |
-| `on_error` | none | Sees every error, for example to report it. |
-| `inputs` | `InputPolicy()` | What a client may send: `client_system_messages` (`False`), `client_context` and `client_state` (`True`, as a `<client_data>` JSON block), `allow_image_urls` (`False`), `max_image_bytes` and `max_message_image_bytes` (5 MiB, 20 MiB), `forwarded_props` (none of `model`, `provider`, `model_options`), and `restore_tool_results` (`False`). |
-| `approvals` | `ApprovalPolicy()` | `allowed_choices` (`once`, `deny`) a client may send, and the Hermes approval `timeout` announced as `expiresAt`. |
-
-All options, the run input mapping, approvals and the thread store contract are in
-[docs/configuration.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/configuration.md).
-
-## Errors
-
-The endpoint refuses a request before streaming with HTTP 400 (`invalid_input`) or 403
-(`forbidden`) and a body `{"error": {"code", "message"}}`; a 400 also carries `reason`. Any
-later failure ends the stream with `RUN_ERROR`. Its `message` is fixed and its `code` is one of:
-
-| `code` | Meaning |
-| --- | --- |
-| `invalid_input` | The request cannot run as sent; nothing was started or stopped. `reason` says why: `malformed_body`, `no_user_message`, `unsupported_media`, `invalid_image`, `image_too_large`, `bad_forwarded_props`, `bad_choice`, `unknown_interrupt` or `stale_resume` (see [configuration](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/configuration.md#errors)). |
-| `forbidden` | `authorize` refused the request. |
-| `hermes_unreachable` | Transport failure talking to Hermes. A start with an idempotency key is retried first. |
-| `hermes_rejected` | Hermes answered with an HTTP error status. |
-| `hermes_bad_response` | Hermes answered 2xx with a body that is not a JSON object. |
-| `hermes_timeout` | The run did not finish within `poll_timeout` while its status was polled. |
-| `store_conflict` | The thread store kept refusing compare-and-set writes. |
-| `internal_error` | Any other exception: a store or hook failure, or a bug. |
-| `failed`, `interrupted` | The Hermes run itself ended that way. |
-
-`RUN_ERROR` never carries exception text, Hermes URLs or Hermes error bodies. The cause goes
-to the `ag_ui_hermes` logger (with tracebacks; the adapter adds no request bodies, headers or tokens, see [security](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/security.md)) and to `on_error`. A Hermes error on `/capabilities` or `/stop`
-answers HTTP 502. All exceptions derive from `HermesError` and are exported with the codes above.
-
-## Reconnect and stop
-
-Closing the browser or switching threads only detaches: the Hermes run keeps going.
-`connect()` rejoins it by replaying the run from its first event, after a `MESSAGES_SNAPSHOT`
-that drops the client's copy of that run, so nothing is duplicated. On a thread with no live
-run and an empty client, `connect()` restores the Hermes session's messages instead, with
-tool calls but without their stored results unless `InputPolicy(restore_tool_results=True)`.
-
-An explicit cancel (`abortRun()` in JS) posts `{threadId, runId}` to `/agent/stop`. The server
-stops the Hermes run only if that AG-UI run started, resumed or rejoined it, so a late stop
-cannot cancel a newer run. A new run on a thread stops that thread's unfinished Hermes run.
-
-Details, including truncated backlogs and lost streams: [docs/connect.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/connect.md).
-
-## Limitations
-
-- **Frontend tools.** Not supported. Hermes runs every tool on the server, and `/v1/runs` cannot
-  hand a call to the client and wait for its result, so `RunAgentInput.tools` is ignored. This
-  needs a change in Hermes.
-- **Tool arguments and ids.** Hermes tool events carry no arguments. AG-UI ids are derived from
-  the run id and event `seq`, arguments are always `{}`, and the `preview` summary is in
-  `TOOL_CALL_START.metadata`. A completion pairs with its start by `tool_call_id` or `id` when
-  the event has one, and otherwise by tool name in start order, which is wrong if two calls of
-  the same tool finish out of order. After a truncated replay, a completion without an id is
-  dropped, since its start may have been evicted. History restored on connect has Hermes' call ids and `"{}"`
-  arguments.
-- **Reasoning.** Not streamed: Hermes sends each reasoning block once, complete.
-- **`ACTIVITY_*` and `STEP_*` events** are not emitted.
-- **Usage** covers the whole Hermes run, reported once by the AG-UI run that sees it end, as the
-  total across every resume. There is no per-step or per-message usage.
-- **Only the last user message is sent.** History lives in the Hermes session. On a thread
-  without a session, earlier text messages go as `conversation_history`, without images.
-- **Hermes keeps 1000 events per run** and drops an unsubscribed run's stream about five minutes
-  after it started. A rejoin after that falls back to polling and shows only the final output.
-- **Hermes version.** Tested against Hermes Agent v0.22.2. The adapter needs the `/v1/runs` API
-  with SSE events (`approval.request`, `run.*`) and `POST /v1/runs/{id}/approval`; older
-  versions without them do not work.
+The adapter streams text, server-side tool calls, reasoning blocks, subagent events,
+and run usage. It accepts image input and can expose host state. Tool execution stays
+on Hermes. Closing the page detaches the stream, and an explicit stop requests cancellation.
 
 ## Compatibility
 
-| | |
+| Component | Requirement |
 | --- | --- |
-| Python | 3.11, 3.12, 3.13 |
-| `ag-ui-protocol` (Python) | 1.x |
-| `@ag-ui/client` (JS peer) | `~1.0.3` (tested with 1.0.3 and 1.0.4) |
-| `@assistant-ui/react-ag-ui` | 0.1.9 or later for `connect()`; tested with 0.1.11 |
-| Node | 22 or later |
-| Hermes Agent | tested with v0.22.2 |
+| Python | 3.11+ (CI covers 3.11–3.13) |
+| `ag-ui-protocol` | 1.x |
+| Node.js | 22+ for the package. Source builds require 22.18+ on Node 22, 24.11+ on Node 24, or 26+. |
+| `@ag-ui/client` | `~1.0.3` (CI checks 1.0.3 and 1.0.4) |
+| `@assistant-ui/react-ag-ui` | Tested with 0.1.11 |
+| Hermes Agent | Tested with v0.22.2. Requires `/v1/runs` with SSE and the run approval endpoint. |
 
-## More
+## Documentation
 
-- [docs/configuration.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/configuration.md): options, run input, approvals, state, thread store
-- [docs/events.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/events.md): Hermes to AG-UI event mapping and ids
-- [docs/connect.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/connect.md): rejoin, resume and stop in detail
-- [docs/security.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/docs/security.md): threat model and what to configure
-- [CONTRIBUTING.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/CONTRIBUTING.md), [CHANGELOG.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/CHANGELOG.md), [SECURITY.md](https://github.com/flix-wg/ag-ui-hermes/blob/main/SECURITY.md)
-
-MIT licensed, see [LICENSE](https://github.com/flix-wg/ag-ui-hermes/blob/main/LICENSE).
+- [Configuration, inputs, hooks, approvals, and errors](docs/configuration.md)
+- [Event mapping and limitations](docs/events.md)
+- [Reconnect, resume, and stop](docs/connect.md)
+- [Security guide](docs/security.md) and [private vulnerability reporting](SECURITY.md)
+- [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), and [MIT license](LICENSE)

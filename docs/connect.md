@@ -28,8 +28,10 @@ always `"{}"`. Their results are not restored: Hermes stores them whole and unre
 live stream only ever showed a truncated, redacted preview. With
 `InputPolicy(restore_tool_results=True)` the results of restored calls come back too, each passed
 through `tool_filter` as a `tool.completed` whose preview is the stored content. A `RunsClient`
-that does not implement `SupportsSessionMessages` (or a failing call) skips the snapshot. Otherwise it opens `GET /v1/runs/{id}/events` from the start of the backlog and
-streams every event through a fresh translator, then follows the live stream.
+that does not implement `SupportsSessionMessages` (or a failing call) skips the snapshot.
+
+When the thread has a live run, the adapter opens `GET /v1/runs/{id}/events` from the start
+of the backlog and streams every event through a fresh translator, then follows the live stream.
 
 If the client holds messages of this Hermes run (their ids start with `<run>:`), the first
 replayed event is preceded by a `MESSAGES_SNAPSHOT` of the client's other messages. That drops the
