@@ -66,7 +66,7 @@ on Hermes. Closing the page detaches the stream, and an explicit stop requests c
 | Node.js | 22+ for the package. Source builds require 22.18+ on Node 22, 24.11+ on Node 24, or 26+. |
 | `@ag-ui/client` | `~1.0.3` (CI checks 1.0.3 and 1.0.4) |
 | `@assistant-ui/react-ag-ui` | Tested with 0.1.11 |
-| Hermes Agent | Tested with v0.22.2. Requires `/v1/runs` with SSE and the run approval endpoint. |
+| Hermes Agent | Tested with v0.22.2–v0.23.3. Requires `/v1/runs` with SSE and the run approval endpoint. |
 
 ## Documentation
 
