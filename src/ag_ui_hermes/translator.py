@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from ag_ui.core import (
     PROTOCOL_VERSION,
+    ActivityDeltaEvent,
+    ActivitySnapshotEvent,
     AssistantMessage,
     BaseEvent,
     CustomEvent,
@@ -46,6 +48,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
     ToolMessage,
 )
+from pydantic import ValidationError
 
 _ToolView = Callable[[str, str, Mapping[str, Any]], "tuple[str, str] | None"]
 _EventMapper = Callable[[Mapping[str, Any]], "Sequence[BaseEvent] | None"]
@@ -53,6 +56,7 @@ UnknownEvents = Literal["drop", "custom", "raw"]
 """What happens to a Hermes event nothing maps: dropped, ``CUSTOM`` ``hermes.<event>`` or ``RAW``."""
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+_A2UI_ACTIVITY_TYPE = "a2ui-surface"
 _IGNORED = frozenset({"approval.responded", "run.waiting_for_approval", "run.steered", "run.stopping"})
 _HANDLED = frozenset(
     {
@@ -60,6 +64,9 @@ _HANDLED = frozenset(
         "message.interim",
         "tool.started",
         "tool.completed",
+        "a2ui.surface",
+        "a2ui.snapshot",
+        "a2ui.delta",
         "reasoning.available",
         "subagent.start",
         "subagent.complete",
@@ -103,6 +110,18 @@ _MAX_COUNT = 2**53 - 1
 def run_started(thread_id: str, run_id: str) -> RunStartedEvent:
     """``RUN_STARTED`` declaring the AG-UI protocol version this adapter speaks."""
     return RunStartedEvent(thread_id=thread_id, run_id=run_id, protocol_version=PROTOCOL_VERSION)
+
+
+def a2ui_activity_snapshot(
+    message_id: str, operations: Sequence[Mapping[str, Any]] | Mapping[str, Any], *, surface_id: str = "main", replace: bool = True
+) -> ActivitySnapshotEvent:
+    """Wrap one Google A2UI operation or an ordered sequence in an AG-UI activity snapshot."""
+    return ActivitySnapshotEvent(
+        message_id=message_id,
+        activity_type=_A2UI_ACTIVITY_TYPE,
+        content={"surfaceId": surface_id, "a2ui_operations": list(operations) if isinstance(operations, Sequence) else [dict(operations)]},
+        replace=replace,
+    )
 
 
 def token_usage(status: Mapping[str, Any]) -> list[TokenUsage] | None:
@@ -359,6 +378,8 @@ class HermesTranslator:
             return self._tool_started(event, key)
         if name == "tool.completed":
             return self._tool_completed(event, key)
+        if name in ("a2ui.surface", "a2ui.snapshot", "a2ui.delta"):
+            return self._a2ui(event, delta=name == "a2ui.delta")
         if name == "reasoning.available":
             return self._reasoning(event, key)
         if name == "subagent.start":
@@ -384,6 +405,32 @@ class HermesTranslator:
             return [RawEvent(event=dict(event), source="hermes")]
         if self._unknown_events == "custom":
             return [CustomEvent(name=f"hermes.{name}", value=dict(event))]
+        return []
+
+    def _a2ui(self, event: Mapping[str, Any], *, delta: bool) -> list[BaseEvent]:
+        content = event.get("content")
+        surface_id = event.get("surface_id", content.get("surfaceId", "main") if isinstance(content, Mapping) else "main")
+        if not isinstance(surface_id, str) or not surface_id:
+            return []
+        message_id = event.get("message_id", f"{self.id_prefix}a2ui:{surface_id}")
+        if not isinstance(message_id, str) or not message_id:
+            return []
+        if delta:
+            patch = event.get("patch")
+            if not isinstance(patch, list):
+                return []
+            try:
+                return [ActivityDeltaEvent(message_id=message_id, activity_type=_A2UI_ACTIVITY_TYPE, patch=patch)]
+            except ValidationError:
+                return []
+        replace = event.get("replace", True)
+        if not isinstance(replace, bool):
+            return []
+        if isinstance(content, Mapping):
+            return [ActivitySnapshotEvent(message_id=message_id, activity_type=_A2UI_ACTIVITY_TYPE, content=dict(content), replace=replace)]
+        operations = event.get("a2ui_operations", event.get("operations"))
+        if isinstance(operations, Mapping) or (isinstance(operations, list) and all(isinstance(op, Mapping) for op in operations)):
+            return [a2ui_activity_snapshot(message_id, operations, surface_id=surface_id, replace=replace)]
         return []
 
     def interrupt(self) -> list[BaseEvent]:

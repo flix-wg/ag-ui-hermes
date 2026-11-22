@@ -2,6 +2,8 @@ from typing import Any
 
 import pytest
 from ag_ui.core import (
+    ActivityDeltaEvent,
+    ActivitySnapshotEvent,
     AssistantMessage,
     BaseEvent,
     CustomEvent,
@@ -19,7 +21,8 @@ from ag_ui.core import (
     UserMessage,
 )
 
-from ag_ui_hermes import HermesTranslator
+from ag_ui_hermes import HermesTranslator, a2ui_activity_snapshot
+from ag_ui_hermes.translator import handles
 
 
 def feed_all(t: HermesTranslator, events: list[dict[str, Any]]) -> list[BaseEvent]:
@@ -53,6 +56,57 @@ RUN: list[dict[str, Any]] = [
 
 def hide_secrets(tool: str, preview: str, _event: object) -> tuple[str, str] | None:
     return None if tool == "secret_lookup" else (tool, preview)
+
+
+def test_a2ui_activity_snapshot_wraps_one_operation_or_an_ordered_sequence() -> None:
+    create = {"createSurface": {"surfaceId": "main"}}
+    assert a2ui_activity_snapshot("activity", create).model_dump(mode="json", by_alias=True, exclude_none=True) == {
+        "type": "ACTIVITY_SNAPSHOT",
+        "messageId": "activity",
+        "activityType": "a2ui-surface",
+        "content": {"surfaceId": "main", "a2ui_operations": [create]},
+        "replace": True,
+    }
+    update = {"updateComponents": {"surfaceId": "main", "components": []}}
+    snapshot = a2ui_activity_snapshot("activity", (create, update), surface_id="panel", replace=False)
+    assert snapshot.content == {"surfaceId": "panel", "a2ui_operations": [create, update]}
+    assert snapshot.replace is False
+
+
+def test_maps_a2ui_surface_snapshot_and_delta() -> None:
+    operations = [{"createSurface": {"surfaceId": "panel"}}]
+    content = {"surfaceId": "panel", "a2ui_operations": operations}
+    patch = [{"op": "add", "path": "/a2ui_operations/-", "value": {"updateComponents": {"surfaceId": "panel", "components": []}}}]
+    source: list[dict[str, Any]] = [
+        {"event": "a2ui.surface", "surface_id": "panel", "operations": operations},
+        {"event": "a2ui.delta", "surface_id": "panel", "patch": patch},
+        {"event": "a2ui.snapshot", "message_id": "initial", "content": content, "replace": False},
+    ]
+    assert all(handles(event) for event in source)
+    _, surface, delta, snapshot = feed_all(HermesTranslator("run_1"), source)
+    assert isinstance(surface, ActivitySnapshotEvent)
+    assert surface == a2ui_activity_snapshot("run_1:a2ui:panel", operations, surface_id="panel")
+    assert isinstance(delta, ActivityDeltaEvent)
+    assert delta.model_dump(mode="json", by_alias=True, exclude_none=True) == {
+        "type": "ACTIVITY_DELTA",
+        "messageId": surface.message_id,
+        "activityType": "a2ui-surface",
+        "patch": patch,
+    }
+    assert isinstance(snapshot, ActivitySnapshotEvent)
+    assert snapshot == a2ui_activity_snapshot("initial", operations, surface_id="panel", replace=False)
+
+
+def test_malformed_a2ui_does_not_interrupt_the_run() -> None:
+    events = feed_all(
+        HermesTranslator("run_1", unknown_events="raw"),
+        [
+            {"event": "a2ui.surface", "operations": ["invalid"]},
+            {"event": "a2ui.delta", "patch": [{"op": "replace", "value": 1}]},
+            {"event": "run.completed"},
+        ],
+    )
+    assert [event.type.value for event in events] == ["RUN_STARTED", "RUN_FINISHED"]
 
 
 def test_maps_text_tools_reasoning_and_replays_with_identical_ids() -> None:

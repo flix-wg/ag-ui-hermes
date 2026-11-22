@@ -57,6 +57,9 @@ The adapter streams text, server-side tool calls, reasoning blocks, subagent eve
 and run usage. It accepts image input and can expose host state. Tool execution stays
 on Hermes. Closing the page detaches the stream, and an explicit stop requests cancellation.
 
+The Python adapter streams Google A2UI generative UI as AG-UI `ACTIVITY_SNAPSHOT` and
+`ACTIVITY_DELTA` events with activity type `a2ui-surface`.
+
 ## Compatibility
 
 | Component | Requirement |

@@ -10,6 +10,8 @@ the translator's API may change in a minor release.
 | `message.interim` (`already_streamed: false`) | its own `TEXT_MESSAGE_START/CONTENT/END` |
 | `tool.started` | `TOOL_CALL_START` (`metadata.preview`), `TOOL_CALL_END`; closes the open text segment |
 | `tool.completed` | `TOOL_CALL_RESULT` (`content` = preview, `metadata.error`, `metadata.duration`) |
+| `a2ui.surface`, `a2ui.snapshot` | `ACTIVITY_SNAPSHOT` (`activityType: "a2ui-surface"`) |
+| `a2ui.delta` | `ACTIVITY_DELTA` (`activityType: "a2ui-surface"`) |
 | `reasoning.available` | `REASONING_START`, `REASONING_MESSAGE_START/CONTENT/END`, `REASONING_END` |
 | `subagent.start` | `SUBAGENT_STARTED` (`description` = goal, `parentToolCallId` = open `delegate_task` call) |
 | `subagent.complete` | `SUBAGENT_FINISHED` (`result` = summary) if completed, else `SUBAGENT_ERROR` |
@@ -24,12 +26,26 @@ the translator's API may change in a minor release.
 Every stream starts with `RUN_STARTED` carrying `protocolVersion`. A terminal run also carries
 `usage` (input, output, total and cache tokens, provider and model) when Hermes reports it.
 
+## Google A2UI
+
+For [Google A2UI generative UI](https://docs.ag-ui.com/concepts/generative-ui-specs), send a
+snapshot with `surface_id` (defaults to `main`) and `operations` (one operation or a list).
+You can also send the operations as `a2ui_operations` or supply a complete `content` object
+with `surfaceId` and `a2ui_operations`. `replace` defaults to `true`. A delta carries a `patch`
+list of RFC 6902 operations against that content. Send the snapshot before its deltas and use
+the same `message_id` on each, or omit it to use `<run>:a2ui:<surface_id>`. A replacing snapshot
+resets the surface before the client reapplies deltas during replay.
+
+Use `ag_ui_hermes.a2ui_activity_snapshot(message_id, operations, surface_id=...)` to wrap
+structured A2UI tool outputs in a snapshot. Hermes's ordinary `tool.completed` events carry
+text previews. The frontend renders the surface using an A2UI renderer.
+
 ## Limitations
 
 - Hermes executes all tools on the server. Tool arguments appear as `{}` because Hermes tool
   events omit them. Without tool IDs, parallel calls of the same tool can pair incorrectly if
   they complete out of order.
-- Hermes sends reasoning in complete blocks. The adapter emits no `ACTIVITY_*` or `STEP_*` events.
+- Hermes sends reasoning in complete blocks. The adapter emits no `STEP_*` events.
 - Token usage covers the whole Hermes run, including every resume. The AG-UI run that sees it
   end reports the total.
 

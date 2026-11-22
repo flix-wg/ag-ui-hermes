@@ -29,7 +29,7 @@ from .errors import (
     StoreConflictError,
 )
 from .store import InMemoryThreadStore, ThreadRecord, ThreadStore
-from .translator import HermesTranslator, UnknownEvents
+from .translator import HermesTranslator, UnknownEvents, a2ui_activity_snapshot
 
 __version__ = _version("ag-ui-hermes")
 
@@ -66,4 +66,5 @@ __all__ = [
     "ToolFilter",
     "UnknownEvents",
     "__version__",
+    "a2ui_activity_snapshot",
 ]
